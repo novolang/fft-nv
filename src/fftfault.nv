@@ -1,0 +1,106 @@
+// fftfault — every way a transform can refuse to run.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A TRANSFORM CAN ACTUALLY REFUSE, WHICH IS LESS THAN IT LOOKS.
+// An FFT over a buffer of the right length cannot fail: it is
+// multiplications and additions over numbers that are already there,
+// and a NaN in the input comes out as a NaN in the output rather than
+// as an error.  Every variant here is therefore a SHAPE disagreement —
+// a length that is not the plan's, an interleaved buffer with an odd
+// number of floats in it, an axis a matrix does not have — or a
+// parameter outside its domain, which is a Kaiser beta below zero and
+// nothing else.
+//
+// WHICH IS WHY THE PLAN IS WHERE THE CHECKING HAPPENS.  `fftplan.of_len`
+// is fallible; `fftcx.forward` against a plan whose length matches is
+// not.  A caller that builds one plan and runs it over ten thousand
+// windows pays the check once, which is the point of the value.  The
+// transforms still take a `Result` because the BUFFER's length is the
+// caller's to get wrong on each call, and that is the only thing they
+// check.
+
+// FftFault is why a transform would not run.
+pub enum FftFault
+    // A transform length that is zero or negative.  A zero-length DFT
+    // has no definition to reach for rather than an obvious empty
+    // answer, so it is refused rather than invented.
+    FftZeroLength(len: Int)
+    // The buffer does not hold the number of samples the plan is for.
+    // `want` is the plan's length in COMPLEX points, `got` is what the
+    // buffer holds — also in points, so the two are comparable without
+    // the reader having to remember the factor of two.
+    FftLengthMismatch(want: Int, got: Int)
+    // An interleaved complex buffer with an odd number of floats in it.
+    // Interleaved means `[re0, im0, re1, im1, …]`, so the length is
+    // always even and an odd one is a caller who passed a real-valued
+    // buffer to a complex transform.
+    FftOddInterleave(floats: Int)
+    // A fixed-length module was handed a length it is not compiled for.
+    // `want` is the module's width and `got` is what arrived.
+    FftFixedWidth(want: Int, got: Int)
+    // A length that a radix-2 transform cannot take.  Named separately
+    // from the general length refusal because `fftcx` accepts ANY
+    // length through Bluestein and only the `fftfix` and the explicitly
+    // radix-2 entry points are restricted — so meeting this one means a
+    // caller reached for the fast path on purpose and missed.
+    FftNotPowerOfTwo(len: Int)
+    // A Kaiser window with a negative beta.  Zero is the rectangular
+    // window and is fine; the useful range is roughly 0 to 20 and
+    // nothing above it is refused, because a beta of 30 is a legal
+    // window that nobody wants rather than an error.
+    FftBadBeta(beta: Float)
+    // A window asked for over fewer than one sample.
+    FftBadWindowLength(len: Int)
+    // A 2-D transform over an array that is not rank 2.  `rank` is what
+    // arrived.
+    FftNotMatrix(rank: Int)
+    // An axis outside the array's rank.
+    FftBadAxis(axis: Int, rank: Int)
+    // A sample rate that is zero or negative, from one of the frequency
+    // helpers.  A rate is a divisor there, so this is the one place a
+    // helper that otherwise cannot fail does.
+    FftBadSampleRate(rate: Float)
+    // The array a 2-D transform was handed does not match the plan pair
+    // it was given.  `rows` and `cols` are the plan's and `got_rows`
+    // and `got_cols` the array's.
+    FftShapeMismatch(rows: Int, cols: Int, got_rows: Int, got_cols: Int)
+
+// message renders the refusal as one line of prose.
+//
+// `Result<_, FftFault>` requires this impl: SPEC § 3.4 admits a
+// `Result` error type only if it implements `Error`.
+impl Error for FftFault
+    // Answer the one-line report: what disagreed, and the two numbers
+    // that disagreed.
+    //
+    // ```novo
+    // use fftfault
+    //
+    // fn main() [io]
+    //     let e = FftLengthMismatch(want: 1024, got: 512)
+    //     println(e.message())
+    //     // fft: the plan is for 1024 points and the buffer holds 512
+    // ```
+    fn message(self) -> Str
+        todo("fft-nv.fftfault.FftFault.message")
+
+// Whether this refusal is a LENGTH or SHAPE disagreement rather than a
+// parameter outside its domain.
+//
+// The distinction is what a caller does next: a shape disagreement
+// means rebuild the plan or reslice the buffer, and a bad parameter
+// means the calling code is wrong.  Named as a predicate so a caller
+// deciding whether to retry can ask rather than match nine arms.
+//
+// ```novo
+// use fftfault
+//
+// fn main() [io]
+//     let a = fftfault.is_shape_fault(FftLengthMismatch(want: 8, got: 4))
+//     let b = fftfault.is_shape_fault(FftBadBeta(beta: -1.0))
+//     println("${a} ${b}")   // true false
+// ```
+pub fn is_shape_fault(e: FftFault) -> Bool []
+    todo("fft-nv.fftfault.is_shape_fault")

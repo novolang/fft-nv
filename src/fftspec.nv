@@ -1,0 +1,154 @@
+// fftspec — what a notebook does with a spectrum after it has one.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// NONE OF THIS IS A TRANSFORM.  Every function here takes an
+// interleaved buffer that a transform already produced and answers
+// something a plot or a threshold wants: a magnitude, a power, a phase,
+// an axis, a shift.  They are in this package rather than in a caller
+// because every one of them is a place where the interleaved layout,
+// the factor of two, or the normalisation convention is easy to get
+// wrong — and getting one of them wrong produces a plot that looks
+// plausible.
+//
+// THE POWER SPECTRUM TAKES ITS WINDOW CORRECTION AS AN ARGUMENT.  A
+// spectrum computed over a windowed signal is scaled down by the
+// window's gain, and there are two gains — coherent for a tone, noise
+// for broadband — so this package will not guess.  `fftwin.coherent_gain`
+// and `fftwin.noise_gain` are where the number comes from, and passing
+// 1.0 means "I did not window" and is a perfectly good answer.
+
+// The magnitude of each bin: the square root of `re² + im²`.
+//
+// `FftOddInterleave` for a buffer with an odd number of floats.
+//
+// ```novo
+// use fftspec
+//
+// fn main() [io]
+//     match fftspec.magnitude([3.0, 4.0])
+//         Ok(m)  => println("${m[0]}")   // 5
+//         Err(e) => println(e.message())
+// ```
+pub fn magnitude(spectrum: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.magnitude")
+
+// The squared magnitude of each bin: `re² + im²`, with no square root.
+//
+// Beside `magnitude` because a threshold compared against a squared
+// threshold is the same test for half the work, and because a
+// comparison of powers never needs the root at all.
+pub fn magnitude_squared(spectrum: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.magnitude_squared")
+
+// The phase of each bin, in radians in `(-π, π]`.
+//
+// The two-argument arctangent of the imaginary and real parts, so the
+// quadrant is right and a bin on the negative real axis is `π` rather
+// than an infinity.  A bin that is exactly zero has no phase and
+// answers 0, which is a convention rather than a fact and is what numpy
+// does.
+pub fn phase(spectrum: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.phase")
+
+// The power spectrum: squared magnitude, scaled for the transform
+// length and the window's gain.
+//
+// `points` is the transform length and `window_gain` is
+// `fftwin.coherent_gain` or `fftwin.noise_gain` — see the module
+// comment for which — or 1.0 for an unwindowed signal.
+//
+// `FftZeroLength` for a non-positive length, `FftBadSampleRate` for a
+// window gain that is zero or negative, since it is a divisor.
+//
+// ```novo
+// use fftspec
+//
+// fn main() [io]
+//     match fftspec.power([2.0, 0.0], 2, 1.0)
+//         Ok(p)  => println("${p[0]}")
+//         Err(e) => println(e.message())
+// ```
+pub fn power(spectrum: [Float], points: Int, window_gain: Float) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.power")
+
+// A power in decibels relative to a reference: `10 log10(p / reference)`.
+//
+// Every spectrum plot in existence has this on its y axis, and the
+// reference is the argument because there is no universal one — 1.0 for
+// a bare ratio, the full-scale power for dBFS, `20e-6` squared for
+// sound pressure.
+//
+// A power of zero is `-inf` rather than a refusal, because a bin can
+// genuinely be zero and a plot draws it off the bottom.
+//
+// `FftBadSampleRate` for a reference that is zero or negative.
+pub fn to_db(power_values: [Float], reference: Float) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.to_db")
+
+// The spectrum rotated so that the zero-frequency bin is in the middle.
+//
+// numpy's `fftshift`.  A full complex spectrum comes out of the
+// transform ordered 0, 1, … n/2-1, -n/2, … -1, which puts the negative
+// frequencies after the positive ones and draws a plot with a
+// discontinuity in the middle of it.  This moves them to the front.
+//
+// `FftOddInterleave` for a buffer with an odd number of floats.
+pub fn fftshift(spectrum: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.fftshift")
+
+// The inverse of `fftshift`.
+//
+// Not the same function: for an odd number of bins the two rotations
+// differ by one, and a package that offered only one of them would
+// round-trip wrongly for every odd length.  numpy makes the same
+// distinction and for the same reason.
+pub fn ifftshift(spectrum: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.ifftshift")
+
+// The frequency of each bin of a FULL complex transform, in hertz.
+//
+// numpy's `fftfreq`: `points` values, positive frequencies first and
+// then the negative ones, matching the order the transform answers in.
+// `fftreal.rfftfreq` is the half-spectrum version.
+//
+// `FftBadSampleRate` for a rate that is zero or negative,
+// `FftZeroLength` for a non-positive length.
+//
+// ```novo
+// use fftspec
+//
+// fn main() [io]
+//     match fftspec.fftfreq(4, 4.0)
+//         Ok(f)  => println("${f[3]}")   // -1
+//         Err(e) => println(e.message())
+// ```
+pub fn fftfreq(points: Int, rate: Float) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftspec.fftfreq")
+
+// The index of the largest-magnitude bin, and `None` for an empty
+// spectrum.
+//
+// The one-line answer to "what frequency is this", and an optional
+// rather than a sentinel because -1 is an index somebody will use.
+//
+// `FftOddInterleave` for a buffer with an odd number of floats.
+pub fn peak_bin(spectrum: [Float]) -> Result<?Int, FftFault> []
+    todo("fft-nv.fftspec.peak_bin")
+
+// The peak's frequency refined by fitting a parabola through the peak
+// bin and its two neighbours.
+//
+// A tone almost never sits exactly on a bin, so the largest bin is off
+// by up to half a bin width — which at a 1 Hz resolution is a half-hertz
+// error in something a caller is about to report as a measurement.
+// Three points and a quadratic put it back to a few percent of a bin,
+// and it is three lines that every practitioner writes and nobody
+// remembers the sign of.
+//
+// `FftBadSampleRate` for a non-positive rate.  A peak at bin 0 or at
+// the last bin has no neighbour on one side and answers the bin's own
+// frequency rather than extrapolating.
+pub fn peak_frequency(spectrum: [Float], points: Int, rate: Float) -> Result<?Float, FftFault> []
+    todo("fft-nv.fftspec.peak_frequency")

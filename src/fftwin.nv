@@ -1,0 +1,146 @@
+// fftwin — the window functions, which are what stops a spectrum from
+// being a lie.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY A WINDOW IS NOT OPTIONAL.  The DFT assumes the buffer it is given
+// repeats forever.  A recording sliced into windows almost never joins
+// up at the seam, and the discontinuity there is a step — which has
+// energy at every frequency.  So an untapered window smears a pure tone
+// across the whole spectrum, and that smearing (spectral leakage) is
+// larger than most of the signals anybody is looking for.  A window
+// tapers the ends to zero so the seam is smooth.
+//
+// THE FOUR, AND WHAT EACH TRADES.  Every window trades the width of the
+// main lobe against the height of the side lobes, and there is no
+// window that wins both:
+//
+//   rectangular   narrowest main lobe, -13 dB side lobes.  The right
+//                 choice only when the signal is exactly periodic in
+//                 the window, which in practice means synthetic data.
+//   Hann          -31 dB side lobes falling off fast.  The default
+//                 everybody reaches for and usually right.
+//   Hamming       -43 dB nearest side lobe, falling off slowly.  Better
+//                 when the interfering tone is CLOSE; worse when it is
+//                 far.
+//   Blackman      -58 dB, at nearly twice the main-lobe width.  For
+//                 finding something small beside something large.
+//   Kaiser(beta)  the family the other three approximate, with beta as
+//                 the dial: 0 is rectangular, ~5 is near Hamming, ~8.6
+//                 is near Blackman, and above that it keeps trading.
+//
+// A NOTE THE PLAN ASKED FOR: SYMMETRIC OR PERIODIC.  A window of length
+// n can be sampled so that the last point mirrors the first (SYMMETRIC,
+// which is what a filter design wants) or so that it would if the
+// window were length n+1 (PERIODIC, which is what spectral analysis
+// wants, because it makes overlapping windows sum to a constant).
+// scipy's `get_window` is periodic by default and its
+// `signal.windows.hann` is symmetric by default, which is a trap that
+// has cost people real time.  Here it is an explicit `periodic: Bool`
+// on every call, with no default, because there is no answer that is
+// right for both callers.
+
+// FftWindow names a taper and carries whatever parameter it has.
+//
+// One enum rather than five functions because a caller almost always
+// wants the window to be a SETTING — read from a configuration, passed
+// down from a plot, compared in a loop — and five functions make that
+// caller write a match of their own.
+pub enum FftWindow
+    // No taper: every sample weighted 1.  Named rather than left as
+    // "pass no window", so that a caller comparing windows has a value
+    // for the baseline.
+    FftRectangular
+    // The raised cosine, `0.5 - 0.5 cos(2πi/N)`.  The default.
+    FftHann
+    // `0.54 - 0.46 cos(2πi/N)` — the raised cosine with the
+    // coefficients that cancel the first side lobe.
+    FftHamming
+    // The three-term cosine, `0.42 - 0.5 cos(2πi/N) + 0.08 cos(4πi/N)`.
+    FftBlackman
+    // The Kaiser-Bessel window with shape parameter `beta`, which is
+    // the family the other three approximate.  `beta` must be
+    // non-negative; 0 is the rectangular window.
+    FftKaiser(beta: Float)
+
+// The window's coefficients, as `points` floats.
+//
+// `periodic` picks the sampling: `true` divides by `points` and is what
+// spectral analysis wants, `false` divides by `points - 1` and mirrors
+// the ends, which is what filter design wants.  See the module comment
+// — the two differ by one sample and the difference is visible in every
+// overlap-add reconstruction.
+//
+// `FftBadWindowLength` below one point, `FftBadBeta` for a negative
+// Kaiser beta.
+//
+// ```novo
+// use fftwin
+//
+// fn main() [io]
+//     match fftwin.coefficients(FftHann, 4, true)
+//         Ok(w)  => println("${w[0]}")   // 0 — the taper starts at zero
+//         Err(e) => println(e.message())
+// ```
+pub fn coefficients(w: FftWindow, points: Int, periodic: Bool) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftwin.coefficients")
+
+// The samples multiplied by the window, element by element.
+//
+// The call a caller actually makes, and it takes the window by value
+// rather than a coefficient list so that the length check happens here
+// rather than in a caller who computed the coefficients once and then
+// changed the window size.
+//
+// `FftBadWindowLength`, `FftBadBeta` as above.
+//
+// ```novo
+// use fftwin
+//
+// fn main() [io]
+//     match fftwin.apply(FftHann, [1.0, 1.0, 1.0, 1.0], true)
+//         Ok(x)  => println("${x[0]}")   // 0
+//         Err(e) => println(e.message())
+// ```
+pub fn apply(w: FftWindow, samples: [Float], periodic: Bool) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftwin.apply")
+
+// The sum of the window's coefficients, which is what a power spectrum
+// has to divide by.
+//
+// A window removes energy, and a spectrum computed over a windowed
+// signal is scaled down by exactly this.  `fftspec.power` takes it as
+// an argument for that reason, and this is where the number comes from.
+//
+// This is COHERENT gain, the right correction for the amplitude of a
+// TONE.  `noise_gain` is the other one.
+pub fn coherent_gain(w: FftWindow, points: Int, periodic: Bool) -> Result<Float, FftFault> []
+    todo("fft-nv.fftwin.coherent_gain")
+
+// The sum of the SQUARES of the window's coefficients, which is what a
+// noise power density has to divide by.
+//
+// The correction a tone needs and the correction broadband noise needs
+// are different — the first scales with the sum and the second with the
+// sum of squares — and a package that offered only one would be wrong
+// for half its callers without saying so.  Both are here, both are
+// named for what they correct, and the README says which to use when.
+pub fn noise_gain(w: FftWindow, points: Int, periodic: Bool) -> Result<Float, FftFault> []
+    todo("fft-nv.fftwin.noise_gain")
+
+// The window's name, for a legend or a log line.
+//
+// `"rectangular"`, `"hann"`, `"hamming"`, `"blackman"`, and
+// `"kaiser"` with the beta appended — scipy's own spellings, so a plot
+// drawn from this package and one drawn from a Python notebook label
+// the same window the same way.
+//
+// ```novo
+// use fftwin
+//
+// fn main() [io]
+//     println(fftwin.name(FftHann))   // hann
+// ```
+pub fn name(w: FftWindow) -> Str []
+    todo("fft-nv.fftwin.name")

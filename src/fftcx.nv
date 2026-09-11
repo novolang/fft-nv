@@ -1,0 +1,174 @@
+// fftcx — the complex transform, forward and inverse, over an
+// interleaved buffer.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THE BUFFER IS AN INTERLEAVED `[Float]`, NOT AN `NdFloat`, and that is
+// a decision the plan asked for explicitly.  `[re0, im0, re1, im1, …]`,
+// `2 * points` floats.
+//
+// Three reasons, in the order they weigh.
+//
+// FIRST: a 1-D FFT is a permutation and a chain of butterflies over a
+// CONTIGUOUS sequence, and `NdFloat` is a buffer PLUS a shape, strides
+// and an offset.  Every read through it is `data[offset + i * stride]`,
+// and a transform's inner loop does nothing but read — so the whole
+// cost of the abstraction lands exactly where the package cannot afford
+// it.  A rank-1 `NdFloat` with stride 1 is the flat buffer with three
+// extra numbers beside it, and this API would spend every call checking
+// that those three numbers are what it needs.
+//
+// SECOND: a complex sequence is not an array of floats with a shape.
+// An `NdFloat` of 2048 floats could be 2048 real samples or 1024
+// complex ones, and nothing in the type says which.  An interleaved
+// `[Float]` does not say either — but it is documented as one thing and
+// the length check catches the other, whereas a shaped array invites a
+// caller to hand over a `[1024, 2]` matrix and expect it to work.
+//
+// THIRD: `fftfix` has to reach a device, and an `NdFloat` never will.
+// Keeping the 1-D surface on plain lists means the fixed-length module
+// is the same API at a different width rather than a second design.
+//
+// The 2-D transforms DO take `NdFloat`, in `fft2d`, because a 2-D
+// transform is rows then columns and the shape IS the information.  The
+// README says why that is not an inconsistency, under "Two buffers, and
+// which one each transform takes".
+//
+// "IN PLACE" MEANS VALUE IN, VALUE OUT.  rustfft's `process` takes
+// `&mut [Complex]` and overwrites it.  A `core` package has no
+// `[mutate]`, so every transform here takes a buffer and answers a new
+// one — and under Perceus a caller who writes
+//
+//     buf = fftcx.forward(p, buf, FftNormNone)!
+//
+// and does not keep the old binding gets the reuse: the buffer is
+// uniquely referenced, so the new value is written into the old one's
+// memory.  That is the in-place transform, spelled as a value.  A
+// caller who DOES keep the old binding gets a copy, which is the
+// honest cost of having asked for both.
+
+// The forward discrete Fourier transform.
+//
+// `buf` is `2 * fftplan.len(p)` floats, interleaved; the answer is the
+// same length, interleaved, with bin `k` at `[2k, 2k + 1]`.  Bin 0 is
+// the sum of the input — the DC term — and for a real input bin `n-k`
+// is the conjugate of bin `k`, which is the redundancy `fftreal`
+// exists to avoid computing.
+//
+// `FftLengthMismatch` when the buffer is not the plan's length, and
+// `FftOddInterleave` when it holds an odd number of floats.  Nothing
+// else: a transform over a buffer of the right length cannot fail, and
+// a NaN in comes out as a NaN rather than as an error.
+//
+// ```novo
+// use fftplan
+// use fftcx
+//
+// fn main() [io]
+//     match fftplan.of_len(2)
+//         Ok(p) =>
+//             match fftcx.forward(p, [1.0, 0.0, 1.0, 0.0], FftNormNone)
+//                 Ok(out) => println("${out[0]}")   // 2 — the DC bin
+//                 Err(e)  => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn forward(p: FftPlan, buf: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.forward")
+
+// The inverse discrete Fourier transform.
+//
+// The same plan serves both directions — the twiddle factors are
+// conjugated rather than recomputed — which is why there is one
+// `of_len` and not two.
+//
+// `inverse(p, forward(p, x, FftNormNone), FftNormBackward)` is `x` to
+// within rounding, and that round trip is the test every
+// implementation of this owes.
+pub fn inverse(p: FftPlan, buf: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.inverse")
+
+// The forward transform of a length that is a power of two, without a
+// plan.
+//
+// The convenience for a caller transforming ONE buffer: it builds the
+// plan, runs it and discards it, which is the right thing exactly once
+// and the wrong thing in a loop.  `FftNotPowerOfTwo` for any other
+// length, because a caller who reached for the fast path by name
+// should be told they missed rather than quietly given Bluestein.
+//
+// ```novo
+// use fftcx
+//
+// fn main() [io]
+//     match fftcx.forward_radix2([1.0, 0.0, 1.0, 0.0], FftNormNone)
+//         Ok(out) => println("${out.len()}")   // 4
+//         Err(e)  => println(e.message())
+// ```
+pub fn forward_radix2(buf: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.forward_radix2")
+
+// The inverse transform of a power-of-two length, without a plan.  The
+// same convenience and the same caution as `forward_radix2`.
+pub fn inverse_radix2(buf: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.inverse_radix2")
+
+// An interleaved complex buffer built from separate real and imaginary
+// lists.
+//
+// `FftLengthMismatch` when the two lists differ in length.  The call a
+// caller makes once at the edge of this package, so that everything
+// inside speaks one layout.
+//
+// ```novo
+// use fftcx
+//
+// fn main() [io]
+//     match fftcx.interleave([1.0, 2.0], [0.0, 0.0])
+//         Ok(b)  => println("${b.len()}")   // 4
+//         Err(e) => println(e.message())
+// ```
+pub fn interleave(re: [Float], im: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.interleave")
+
+// The real parts of an interleaved buffer.
+//
+// `FftOddInterleave` for a buffer with an odd number of floats.
+pub fn real_parts(buf: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.real_parts")
+
+// The imaginary parts of an interleaved buffer.
+pub fn imag_parts(buf: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.imag_parts")
+
+// An interleaved complex buffer from real samples, with every imaginary
+// part zero.
+//
+// What a caller does to run a real signal through the complex
+// transform.  Correct, and twice the work of `fftreal.forward`, which
+// is why that module exists — this call is for the case where the
+// caller wants the full spectrum anyway.
+//
+// Total: every list of floats is a list of real samples.
+pub fn of_real(samples: [Float]) -> [Float] []
+    todo("fft-nv.fftcx.of_real")
+
+// The element-wise product of two interleaved complex buffers.
+//
+// Convolution in the time domain is multiplication in the frequency
+// domain, so this is the middle step of every FFT-based filter,
+// correlation and polynomial multiply — and it is here rather than in
+// the caller because writing it against an interleaved layout is
+// exactly the loop an interleaved layout invites getting wrong.
+//
+// `FftLengthMismatch` when the two buffers differ.
+pub fn mul_spectra(left: [Float], right: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.mul_spectra")
+
+// The complex conjugate of an interleaved buffer: every imaginary part
+// negated.
+//
+// The other half of a correlation, and the operation that turns a
+// forward plan into an inverse one.
+pub fn conjugate(buf: [Float]) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftcx.conjugate")

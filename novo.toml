@@ -1,0 +1,51 @@
+[package]
+name        = "fft-nv"
+version     = "0.0.1"
+description = "The fast Fourier transform as a plan built once per length: radix-2, mixed-radix and Bluestein for prime lengths, forward and inverse complex transforms over an interleaved buffer the caller owns, the real-input transform that answers the half spectrum, 2-D transforms over ndarray-nv matrices, the four window functions a spectrum needs, and the frequency, power and shift helpers a notebook reaches for.  A fixed-length radix-2 module builds for a microcontroller.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: a transform is arithmetic over numbers the caller already
+# holds.  Nothing is read, nothing is written, no clock is consulted —
+# a plan is trigonometry over a length, and the samples arrive as a
+# buffer.
+#
+# It carries `tests/embedded_probe.nv`, so the device claim is BUILT —
+# for `fftfix`, the fixed-length radix-2 transform over a `@value`
+# buffer with no allocation anywhere in it.  A sensor pipeline that
+# takes a 64-point spectrum of an accelerometer window every few
+# milliseconds is the consumer, and the rest of the package — which
+# speaks `[Float]`, `NdFloat` and `Str` — is not on that path.
+layer       = "core"
+
+category    = "science"
+
+tags = ["fft", "dft", "rustfft", "scipy", "signal", "spectrum", "window", "embedded", "science"]
+repository  = "https://github.com/novolang/fft-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "A plan built once per length, and the transforms that run against it"
+
+[dependencies]
+# ndarray-nv carries the 2-D case and nothing else.  A 2-D transform is
+# rows then columns, so the SHAPE is the information — a caller handing
+# over a flat list and a row count would be writing the stride
+# arithmetic this package exists to have written once.  The 1-D
+# transforms take a plain interleaved `[Float]` instead, and the README
+# section "Two buffers, and which one each transform takes" says why
+# that is not an inconsistency.
+#
+# `core`, so the layer rule holds, and `fftfix` uses none of it — the
+# device probe reaches only that module.
+ndarray-nv = "^0.0.1"

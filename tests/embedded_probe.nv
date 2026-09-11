@@ -1,0 +1,153 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of its own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  The consumer that
+// makes the claim worth having is a condition-monitoring node: an
+// accelerometer sampled at a kilohertz, a 64-point window filled one
+// reading at a time, one forward transform, and a look at which bin
+// holds the energy.  A bearing that has begun to fail rings at a
+// frequency a threshold can watch for, and the whole pipeline is a
+// fixed-size buffer, six stages of butterflies and a comparison.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today, so a device that executed this would panic on the first line
+// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks the module and refuses a list literal, a `Str`
+// concatenation or an unbounded `while` wherever the implementation
+// later puts one.
+//
+// `fftplan`, `fftcx`, `fftreal`, `fftwin`, `fftspec` AND `fft2d` ARE
+// NOT USED HERE, and that is the split rather than a convenience: they
+// speak `[Float]`, `[Int]`, `Str` and ndarray-nv's, a list is a heap
+// allocation, and the embedded runtime defines no allocator.  One
+// host-only function anywhere in a compilation unit is an undefined
+// symbol at embedded link time whether or not the firmware calls it, so
+// the half a device uses is `fftfix` and takes and returns `@value`
+// structs whose arrays are stored inline.
+
+use fftfix
+
+// One reading from a 12-bit ADC, scaled to g.  A `@value` struct
+// because a firmware holds a sample as a stack value and never as a
+// list — and because the probe needs one call site that constructs a
+// float from an integer the way the real interrupt handler would.
+@value
+struct ProbeSample
+    // The raw count, 0 to 4095.
+    raw: Int
+
+// A window's worth of readings, held the way a firmware holds a
+// constant: a field of a `@value` struct, so `[Int; 8]` is a true
+// inline array rather than a list (SPEC § 14.4).
+//
+// Eight and not sixty-four, because the probe is checking the TIER and
+// not the arithmetic: what matters is that the loop filling the buffer,
+// the transform and the peak search all compile, and eight readings
+// exercise every one of those with a source file a person can read.
+@value
+struct ProbeWindow
+    r: [Int; 8]
+
+// Eight ADC counts around mid-scale — what a small oscillation on top
+// of a 1 g bias looks like coming out of a sensor.
+fn probe_window() -> ProbeWindow
+    ProbeWindow { r: [2048, 2300, 2048, 1796, 2048, 2300, 2048, 1796] }
+
+// A raw count as a float in g, for a sensor at plus or minus 2 g over
+// 12 bits: `(raw - 2048) * 4.0 / 4096.0`.
+//
+// The arithmetic an interrupt handler does before it stores a sample,
+// written out so that the tier checker sees a float multiply and a
+// float divide on this path.
+fn probe_scale(s: ProbeSample) -> Float
+    let centred: Int = s.raw - 2048
+    let g: Float = centred as Float * 4.0 / 4096.0
+    g
+
+fn main() [hw]
+    // The constants, so a device that sizes a static buffer compiles
+    // the same numbers the host does.
+    //
+    // Each step is bound with its type written out because a call into
+    // another module does not have its return type inferred in a
+    // single-file build.  Inside a package built as one unit — which is
+    // what every host suite does — none of these annotations is needed.
+    let points: Int = fftfix.FFTFIX_C64_POINTS
+    let wide: Int = fftfix.FFTFIX_C256_POINTS
+
+    // The window a firmware starts from: a zeroed buffer on the stack,
+    // with no allocation behind it.
+    var buf: FftC64 = fftfix.c64_zero()
+
+    // Fill it one reading at a time, which is what the interrupt
+    // handler does.  A bounded `for` over a fixed count — the tier
+    // refuses an unbounded loop, and this is what a bounded one looks
+    // like.
+    let w: ProbeWindow = probe_window()
+    for i in 0..8
+        let s: ProbeSample = ProbeSample { raw: w.r[i] }
+        let g: Float = probe_scale(s)
+        buf = fftfix.c64_with_real(buf, i, g)
+
+    // A complex setter too, so that path is compiled: an I/Q receiver
+    // fills both halves.
+    buf = fftfix.c64_with(buf, 8, 0.0, 0.0)
+
+    // The transform itself.  Value in, value out, and with no other
+    // binding live this is the in-place form: the stack slot is written
+    // over.
+    buf = fftfix.c64_forward(buf)
+
+    // What the pipeline actually asks: which bin holds the energy, and
+    // how much.  Both are integer and float arithmetic over the value
+    // in hand.
+    let peak: Int = fftfix.c64_peak_bin(buf)
+    let energy: Float = fftfix.c64_power_at(buf, peak)
+    let dc: Float = fftfix.c64_power_at(buf, 0)
+    let re0: Float = fftfix.c64_re_at(buf, 0)
+    let im0: Float = fftfix.c64_im_at(buf, 0)
+
+    // And the round trip, which is what a device doing a filter runs:
+    // forward, edit, inverse.
+    buf = fftfix.c64_inverse(buf)
+
+    // The wide width, so both types and both sets of entry points are
+    // compiled for the target rather than only the narrow one.
+    var big: FftC256 = fftfix.c256_zero()
+    big = fftfix.c256_with_real(big, 0, 1.0)
+    big = fftfix.c256_with(big, 1, 0.0, 0.0)
+    big = fftfix.c256_forward(big)
+    let big_peak: Int = fftfix.c256_peak_bin(big)
+    let big_energy: Float = fftfix.c256_power_at(big, big_peak)
+    let big_re: Float = fftfix.c256_re_at(big, 0)
+    let big_im: Float = fftfix.c256_im_at(big, 0)
+    big = fftfix.c256_inverse(big)
+
+    // A threshold comparison, which is the decision the node is for:
+    // ringing above a bin the DC term does not reach.
+    let alarm: Bool = energy > dc * 4.0
+    let wide_alarm: Bool = big_energy > 0.0
+
+    // Every value the pipeline computed, folded into one comparison, so
+    // that nothing above is dead and the checker has to compile all of
+    // it.  A counted `for` is the bounded shape this tier admits; an
+    // unbounded `while` is not, which is why there is no park loop here
+    // (SPEC § 12.4).
+    var total: Int = points + wide + peak + big_peak
+    if alarm
+        total = total + 1
+    if wide_alarm
+        total = total + 1
+    if re0 > im0
+        total = total + 1
+    if big_re > big_im
+        total = total + 1
+    for _ in 0..1
+        if total > 0
+            total = total - 1

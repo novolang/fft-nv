@@ -1,0 +1,163 @@
+// fft2d — the two-dimensional transform, over ndarray-nv matrices.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THIS MODULE TAKES `NdFloat` WHERE `fftcx` TAKES `[Float]`.  A 2-D
+// transform IS rows then columns: transform every row of the matrix,
+// then transform every column of the result.  So the row and column
+// extents are not a convention a caller and this package agree on —
+// they are the operation.  A flat list plus a row count would be this
+// package asking a caller to carry a shape beside a buffer, which is
+// precisely what `NdFloat` is, badly.
+//
+// A 1-D transform has no such shape: a complex sequence is a sequence,
+// the layout is interleaved, and `NdFloat`'s strides and offset would
+// be three numbers checked on every call and used by nothing.
+// `fftcx`'s module comment has the argument at length.
+//
+// THE COMPLEX LAYOUT IN A MATRIX IS A TRAILING AXIS OF 2.  A complex
+// `r × c` image is an `NdFloat` of shape `[r, c, 2]`, with the last
+// axis carrying the real and imaginary parts.  That is the same
+// interleaving `fftcx` uses, spelled as a shape — `to_list` on such an
+// array gives exactly the interleaved buffer, which is what makes the
+// two halves of this package one package.  `of_real` is the call that
+// builds one from an `r × c` real image.
+//
+// THE PLAN PAIR.  A 2-D transform of an `r × c` matrix needs a plan of
+// length `c` for the rows and one of length `r` for the columns.  They
+// are two `FftPlan`s and this module takes both, rather than a plan
+// type of its own: a square image uses one plan twice, and a caller
+// transforming a stack of images of one size builds them once.
+
+use ndfloat
+
+// A complex matrix from a real one: shape `[r, c]` becomes `[r, c, 2]`
+// with every imaginary part zero.
+//
+// `FftNotMatrix` for an array that is not rank 2.
+//
+// ```novo
+// use ndfloat
+// use fft2d
+//
+// fn main() [io]
+//     match ndfloat.zeros([2, 2])
+//         Ok(m) =>
+//             match fft2d.of_real(m)
+//                 Ok(c)  => println("${ndfloat.rank(c)}")   // 3
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn of_real(m: NdFloat) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.of_real")
+
+// The real part of a complex matrix: shape `[r, c, 2]` back to
+// `[r, c]`.
+//
+// `FftNotMatrix` for an array that is not rank 3 with a trailing axis
+// of 2.
+pub fn real_part(m: NdFloat) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.real_part")
+
+// The forward 2-D transform of a complex matrix of shape `[r, c, 2]`.
+//
+// `row_plan` is for `c` points and `col_plan` for `r`.
+// `FftShapeMismatch` when either disagrees with the matrix, naming all
+// four numbers, and `FftNotMatrix` for the wrong rank.
+//
+// Rows first and then columns, which is the order numpy's `fft2`
+// documents; the two orders give the same answer in exact arithmetic
+// and differ in the last bits in floating point, so it is fixed rather
+// than left to an implementation.
+//
+// ```novo
+// use ndfloat
+// use fftplan
+// use fft2d
+//
+// fn main() [io]
+//     match ndfloat.zeros([2, 2, 2])
+//         Ok(m) =>
+//             match fftplan.of_len(2)
+//                 Ok(p) =>
+//                     match fft2d.forward(p, p, m, FftNormNone)
+//                         Ok(out) => println("${ndfloat.rank(out)}")   // 3
+//                         Err(e)  => println(e.message())
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn forward(row_plan: FftPlan, col_plan: FftPlan, m: NdFloat,
+               norm: FftNorm) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.forward")
+
+// The inverse 2-D transform.  The same plan pair and the same shape
+// rules.
+pub fn inverse(row_plan: FftPlan, col_plan: FftPlan, m: NdFloat,
+               norm: FftNorm) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.inverse")
+
+// The transform along ONE axis of a complex matrix, leaving the other
+// alone.
+//
+// `axis` is 0 for the columns and 1 for the rows.  The building block
+// `forward` is two of, published because a separable filter that acts
+// on rows only — a horizontal blur, a scan-line correlation — is half
+// the work of a full 2-D transform and a caller should not have to
+// transpose twice to get it.
+//
+// `FftBadAxis` for an axis outside 0 or 1.
+pub fn forward_axis(p: FftPlan, m: NdFloat, axis: Int,
+                    norm: FftNorm) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.forward_axis")
+
+// The inverse transform along one axis.
+pub fn inverse_axis(p: FftPlan, m: NdFloat, axis: Int,
+                    norm: FftNorm) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.inverse_axis")
+
+// The magnitude of every element of a complex matrix: `[r, c, 2]` to
+// `[r, c]`.
+//
+// What an image of a 2-D spectrum is drawn from, and the 2-D twin of
+// `fftspec.magnitude`.
+pub fn magnitude(m: NdFloat) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.magnitude")
+
+// The 2-D spectrum rotated so that the zero-frequency element is in the
+// middle.
+//
+// numpy's `fftshift` over both axes, which is what turns a corner-heavy
+// 2-D spectrum into the centred picture everybody recognises.
+//
+// `FftNotMatrix` for the wrong rank.
+pub fn fftshift(m: NdFloat) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.fftshift")
+
+// The inverse of `fftshift` over both axes.
+//
+// A separate function for the same reason the 1-D pair is: an odd
+// extent shifts by a different amount in each direction.
+pub fn ifftshift(m: NdFloat) -> Result<NdFloat, FftFault> []
+    todo("fft-nv.fft2d.ifftshift")
+
+// The shape a complex matrix has, as its real row and column counts.
+//
+// `[r, c, 2]` answers `[r, c]`, and this is the call that gets the two
+// numbers a caller needs to build the plan pair.  `FftNotMatrix` when
+// the array is not that shape.
+//
+// ```novo
+// use ndfloat
+// use fft2d
+//
+// fn main() [io]
+//     match ndfloat.zeros([4, 8, 2])
+//         Ok(m) =>
+//             match fft2d.complex_shape(m)
+//                 Ok(s)  => println("${s}")   // [4, 8]
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn complex_shape(m: NdFloat) -> Result<[Int], FftFault> []
+    todo("fft-nv.fft2d.complex_shape")

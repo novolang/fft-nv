@@ -1,0 +1,752 @@
+// tests/fft_tests.nv — the transforms whose answers are exact, the
+// identities every FFT owes, and the window coefficients scipy prints.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// fft-nv.<module>.<fn>` from the `todo()` that is each body.  That is
+// the expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// WHERE THE VECTORS COME FROM, AND WHY SO FEW ARE NUMBERS.  An FFT over
+// arbitrary data has no closed form to assert against, so a suite that
+// hard-coded `numpy.fft.fft(x)` for a random `x` would be asserting
+// this implementation against a transcription.  What CAN be asserted is
+// of three kinds, and all three are here:
+//
+//   - THE CASES WITH EXACT ANSWERS.  A length-2 transform is one add
+//     and one subtract.  A constant signal transforms to a single DC
+//     bin and zeros.  A single non-zero sample transforms to a flat
+//     spectrum.  A pure tone at exactly bin k transforms to two bins.
+//     None of those needs numpy and none of them is approximate in
+//     exact arithmetic.
+//   - THE IDENTITIES.  Forward then inverse is the identity; Parseval's
+//     theorem relates the two energies; the real transform agrees with
+//     the complex one over the first half; `fftshift` and `ifftshift`
+//     invert each other.  These hold for ANY input, which is what makes
+//     them worth more than a table.
+//   - THE PUBLISHED NUMBERS.  The window coefficient formulas are in
+//     every textbook and in scipy's docstrings; the bin-count rule and
+//     the frequency axes are numpy's documented output.
+//
+// TOLERANCE: `1e-12` on a round trip of small integers, which is about
+// four orders of magnitude above the double-precision noise floor for
+// these lengths and well below anything an algorithm mistake produces.
+// A transform that is wrong is wrong by O(1), not by 1e-11.
+
+use std.test
+use ndfloat
+use fftplan
+use fftcx
+use fftreal
+use fftwin
+use fftspec
+use fft2d
+use fftfix
+use fftfault
+
+// ── the plan ────────────────────────────────────────────────────────
+
+@test
+fn test_a_power_of_two_length_chooses_the_radix_two_path()
+    match fftplan.of_len(1024)
+        Ok(p)  =>
+            test.assert_eq(fftplan.len(p), 1024)
+            test.assert_eq(fftplan.float_len(p), 2048)
+            test.assert_eq(fftplan.inner_len(p), 1024)
+            match fftplan.algorithm(p)
+                FftRadix2(k)     => test.assert_eq(k, 10)
+                FftMixedRadix(_) => test.fail("1024 is 2^10")
+                FftBluestein(_)  => test.fail("1024 is 2^10")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_composite_length_is_factored_and_a_prime_one_goes_through_bluestein()
+    // 1000 is 2·2·2·5·5·5 and every step is a small DFT; 1021 is prime
+    // and carries a 2048-point convolution.  The difference is what a
+    // caller choosing a window size is choosing between.
+    test.assert_eq(fftplan.factors(1000), [2, 2, 2, 5, 5, 5])
+    test.assert_eq(fftplan.factors(1021), [1021])
+    match fftplan.of_len(1000)
+        Ok(p)  =>
+            match fftplan.algorithm(p)
+                FftMixedRadix(f) => test.assert_eq(f, [2, 2, 2, 5, 5, 5])
+                FftRadix2(_)     => test.fail("1000 is not a power of two")
+                FftBluestein(_)  => test.fail("1000 factors into small primes")
+        Err(e) => test.fail(e.message())
+    match fftplan.of_len(1021)
+        Ok(p)  =>
+            // The next power of two at or above 2·1021 - 1 = 2041.
+            test.assert_eq(fftplan.inner_len(p), 2048)
+            match fftplan.algorithm(p)
+                FftBluestein(n)  => test.assert_eq(n, 2048)
+                FftRadix2(_)     => test.fail("1021 is prime")
+                FftMixedRadix(_) => test.fail("1021 is prime")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_only_a_non_positive_length_has_no_transform()
+    // Every positive length has one, by Bluestein if by nothing else,
+    // so this is the plan's only refusal.
+    match fftplan.of_len(0)
+        Ok(_)  => test.fail("a zero-length DFT has no definition")
+        Err(e) =>
+            match e
+                FftZeroLength(n) => test.assert_eq(n, 0)
+                _                => test.fail("expected FftZeroLength: ${e.message()}")
+            test.assert_eq(fftfault.is_shape_fault(e), true)
+    match fftplan.of_len(-4)
+        Ok(_)  => test.fail("a negative length is not a length")
+        Err(_) => test.assert_eq(true, true)
+    match fftplan.of_len(1)
+        Ok(p)  => test.assert_eq(fftplan.len(p), 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_power_of_two_predicates_answer_from_the_length_alone()
+    test.assert_eq(fftplan.is_power_of_two(1024), true)
+    test.assert_eq(fftplan.is_power_of_two(1000), false)
+    test.assert_eq(fftplan.is_power_of_two(1), true)
+    test.assert_eq(fftplan.is_power_of_two(0), false)
+    test.assert_eq(fftplan.next_power_of_two(1000), 1024)
+    test.assert_eq(fftplan.next_power_of_two(1024), 1024)
+    test.assert_eq(fftplan.next_power_of_two(1), 1)
+
+@test
+fn test_the_four_normalisations_put_the_factor_of_n_in_four_places()
+    // numpy and scipy are FftNormBackward; FFTW is FftNormNone; a
+    // unitary transform is FftNormOrtho.  All four are in use, which is
+    // why none of them is a default.
+    test.assert_approx(fftplan.scale(FftNormNone, 4, true), 1.0, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormNone, 4, false), 1.0, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormForward, 4, true), 0.25, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormForward, 4, false), 1.0, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormBackward, 4, true), 1.0, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormBackward, 4, false), 0.25, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormOrtho, 4, true), 0.5, 1e-12)
+    test.assert_approx(fftplan.scale(FftNormOrtho, 4, false), 0.5, 1e-12)
+
+// ── the complex transform, where the answers are exact ──────────────
+
+@test
+fn test_a_length_two_transform_is_one_add_and_one_subtract()
+    // The whole DFT of length 2: bin 0 is a+b, bin 1 is a-b.  No
+    // trigonometry, no tolerance, and an implementation that gets this
+    // wrong is wrong everywhere.
+    match fftplan.of_len(2)
+        Ok(p)  =>
+            match fftcx.forward(p, [1.0, 0.0, 3.0, 0.0], FftNormNone)
+                Ok(out) =>
+                    test.assert_eq(out.len(), 4)
+                    test.assert_approx(out[0], 4.0, 1e-12)
+                    test.assert_approx(out[1], 0.0, 1e-12)
+                    test.assert_approx(out[2], -2.0, 1e-12)
+                    test.assert_approx(out[3], 0.0, 1e-12)
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_constant_signal_is_one_bin_and_an_impulse_is_a_flat_spectrum()
+    // The two duals, and both are exact.  A constant transforms to all
+    // its energy in bin 0; a single non-zero sample transforms to every
+    // bin equal.
+    match fftplan.of_len(4)
+        Ok(p)  =>
+            match fftcx.forward(p, [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0], FftNormNone)
+                Ok(out) =>
+                    test.assert_approx(out[0], 4.0, 1e-12)
+                    test.assert_approx(out[2], 0.0, 1e-12)
+                    test.assert_approx(out[4], 0.0, 1e-12)
+                    test.assert_approx(out[6], 0.0, 1e-12)
+                Err(e)  => test.fail(e.message())
+            match fftcx.forward(p, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], FftNormNone)
+                Ok(out) =>
+                    test.assert_approx(out[0], 1.0, 1e-12)
+                    test.assert_approx(out[2], 1.0, 1e-12)
+                    test.assert_approx(out[4], 1.0, 1e-12)
+                    test.assert_approx(out[6], 1.0, 1e-12)
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_forward_then_inverse_is_the_identity()
+    // The one identity every implementation owes, and the reason
+    // `FftNormBackward` exists: the factor of n has to land somewhere
+    // for this to hold with no scaling by the caller.
+    match fftplan.of_len(4)
+        Ok(p)  =>
+            let x = [1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0]
+            match fftcx.forward(p, x, FftNormNone)
+                Ok(spectrum) =>
+                    match fftcx.inverse(p, spectrum, FftNormBackward)
+                        Ok(back) =>
+                            test.assert_approx(back[0], 1.0, 1e-12)
+                            test.assert_approx(back[2], 2.0, 1e-12)
+                            test.assert_approx(back[4], 3.0, 1e-12)
+                            test.assert_approx(back[6], 4.0, 1e-12)
+                        Err(e)   => test.fail(e.message())
+                Err(e)       => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_buffer_of_the_wrong_length_is_the_only_thing_a_transform_refuses()
+    // A transform over the right length cannot fail — a NaN in is a NaN
+    // out rather than an error — so the plan's length and the buffer's
+    // are the whole of what is checked.
+    match fftplan.of_len(4)
+        Ok(p)  =>
+            match fftcx.forward(p, [1.0, 0.0], FftNormNone)
+                Ok(_)  => test.fail("the plan is for four points")
+                Err(e) =>
+                    match e
+                        FftLengthMismatch(want, got) =>
+                            test.assert_eq(want, 4)
+                            test.assert_eq(got, 1)
+                        _                            => test.fail("expected FftLengthMismatch: ${e.message()}")
+            match fftcx.forward(p, [1.0, 0.0, 1.0], FftNormNone)
+                Ok(_)  => test.fail("an interleaved buffer has an even length")
+                Err(e) =>
+                    match e
+                        FftOddInterleave(n) => test.assert_eq(n, 3)
+                        _                   => test.fail("expected FftOddInterleave: ${e.message()}")
+            match fftcx.inverse(p, [1.0, 0.0], FftNormNone)
+                Ok(_)  => test.fail("the plan is for four points")
+                Err(_) => test.assert_eq(true, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_planless_convenience_refuses_a_length_it_cannot_take()
+    // A caller who reached for the fast path by name should be told
+    // they missed rather than quietly handed Bluestein.
+    match fftcx.forward_radix2([1.0, 0.0, 1.0, 0.0], FftNormNone)
+        Ok(out) => test.assert_eq(out.len(), 4)
+        Err(e)  => test.fail(e.message())
+    match fftcx.forward_radix2([1.0, 0.0, 1.0, 0.0, 1.0, 0.0], FftNormNone)
+        Ok(_)  => test.fail("three points is not a power of two")
+        Err(e) =>
+            match e
+                FftNotPowerOfTwo(n) => test.assert_eq(n, 3)
+                _                   => test.fail("expected FftNotPowerOfTwo: ${e.message()}")
+    match fftcx.inverse_radix2([1.0, 0.0, 1.0, 0.0], FftNormBackward)
+        Ok(out) => test.assert_eq(out.len(), 4)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_the_layout_helpers_move_between_separate_lists_and_one_buffer()
+    match fftcx.interleave([1.0, 2.0], [3.0, 4.0])
+        Ok(b)  =>
+            test.assert_eq(b.len(), 4)
+            test.assert_approx(b[0], 1.0, 1e-12)
+            test.assert_approx(b[1], 3.0, 1e-12)
+            match fftcx.real_parts(b)
+                Ok(re) => test.assert_approx(re[1], 2.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match fftcx.imag_parts(b)
+                Ok(im) => test.assert_approx(im[1], 4.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match fftcx.conjugate(b)
+                Ok(c)  => test.assert_approx(c[1], -3.0, 1e-12)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+    match fftcx.interleave([1.0, 2.0], [3.0])
+        Ok(_)  => test.fail("the two lists must be the same length")
+        Err(_) => test.assert_eq(true, true)
+    let z = fftcx.of_real([1.0, 2.0])
+    test.assert_eq(z.len(), 4)
+    test.assert_approx(z[1], 0.0, 1e-12)
+    match fftcx.real_parts([1.0, 2.0, 3.0])
+        Ok(_)  => test.fail("an interleaved buffer has an even length")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_multiplying_two_spectra_is_the_middle_step_of_every_filter()
+    // (1 + 0i) * (2 + 3i) is 2 + 3i; (0 + 1i) * (0 + 1i) is -1.
+    match fftcx.mul_spectra([1.0, 0.0, 0.0, 1.0], [2.0, 3.0, 0.0, 1.0])
+        Ok(p)  =>
+            test.assert_approx(p[0], 2.0, 1e-12)
+            test.assert_approx(p[1], 3.0, 1e-12)
+            test.assert_approx(p[2], -1.0, 1e-12)
+            test.assert_approx(p[3], 0.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftcx.mul_spectra([1.0, 0.0], [1.0, 0.0, 1.0, 0.0])
+        Ok(_)  => test.fail("the two spectra must be the same length")
+        Err(_) => test.assert_eq(true, true)
+
+// ── the real transform ──────────────────────────────────────────────
+
+@test
+fn test_the_bin_count_is_half_plus_one_and_the_plus_one_is_nyquist()
+    // A 1024-point real transform gives 513 bins, not 512.  Bin 0 is DC
+    // and bin 512 is Nyquist; both are real and both are in the answer.
+    test.assert_eq(fftreal.bin_count(1024), 513)
+    test.assert_eq(fftreal.bin_count(4), 3)
+    test.assert_eq(fftreal.bin_count(2), 2)
+
+@test
+fn test_the_real_transform_of_a_constant_is_its_sum_and_then_zeros()
+    match fftplan.of_len(4)
+        Ok(p)  =>
+            match fftreal.forward(p, [1.0, 1.0, 1.0, 1.0], FftNormNone)
+                Ok(out) =>
+                    // Three bins, six floats.
+                    test.assert_eq(out.len(), 6)
+                    test.assert_approx(out[0], 4.0, 1e-12)
+                    // DC has no imaginary part, by the symmetry.
+                    test.assert_approx(out[1], 0.0, 1e-12)
+                    test.assert_approx(out[2], 0.0, 1e-12)
+                    test.assert_approx(out[4], 0.0, 1e-12)
+                    // Nyquist has none either.
+                    test.assert_approx(out[5], 0.0, 1e-12)
+                    match fftreal.inverse(p, out, FftNormBackward)
+                        Ok(back) =>
+                            test.assert_eq(back.len(), 4)
+                            test.assert_approx(back[2], 1.0, 1e-12)
+                        Err(e)   => test.fail(e.message())
+                Err(e)  => test.fail(e.message())
+            match fftreal.forward(p, [1.0, 1.0], FftNormNone)
+                Ok(_)  => test.fail("the plan is for four samples")
+                Err(_) => test.assert_eq(true, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_half_spectrum_and_the_full_one_convert_both_ways()
+    // Bin n-k is the conjugate of bin k, which is the whole reason the
+    // real transform answers half — so the reconstruction is exact and
+    // not an approximation.
+    match fftreal.to_full([4.0, 0.0, 0.0, 0.0, 0.0, 0.0], 4)
+        Ok(full) =>
+            test.assert_eq(full.len(), 8)
+            test.assert_approx(full[0], 4.0, 1e-12)
+            match fftreal.to_half(full, 4)
+                Ok(half) =>
+                    test.assert_eq(half.len(), 6)
+                    test.assert_approx(half[0], 4.0, 1e-12)
+                Err(e)   => test.fail(e.message())
+        Err(e)   => test.fail(e.message())
+    match fftreal.to_full([1.0, 0.0], 4)
+        Ok(_)  => test.fail("a four-point half spectrum has three bins")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_the_real_frequency_axis_runs_to_nyquist_inclusive()
+    // scipy's rfftfreq: eight samples at 8 Hz gives five bins at
+    // 0, 1, 2, 3, 4 — and 4 is the Nyquist frequency, half the rate.
+    match fftreal.rfftfreq(8, 8.0)
+        Ok(f)  =>
+            test.assert_eq(f.len(), 5)
+            test.assert_approx(f[0], 0.0, 1e-12)
+            test.assert_approx(f[1], 1.0, 1e-12)
+            test.assert_approx(f[4], 4.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftreal.rfftfreq(8, 0.0)
+        Ok(_)  => test.fail("a rate is a divisor here")
+        Err(e) =>
+            match e
+                FftBadSampleRate(_) => test.assert_eq(true, true)
+                _                   => test.fail("expected FftBadSampleRate: ${e.message()}")
+    match fftreal.rfftfreq(0, 8.0)
+        Ok(_)  => test.fail("no samples, no axis")
+        Err(_) => test.assert_eq(true, true)
+
+// ── windows ─────────────────────────────────────────────────────────
+
+@test
+fn test_the_rectangular_window_is_all_ones_and_hann_starts_at_zero()
+    match fftwin.coefficients(FftRectangular, 4, true)
+        Ok(w)  =>
+            test.assert_eq(w.len(), 4)
+            test.assert_approx(w[0], 1.0, 1e-12)
+            test.assert_approx(w[3], 1.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // Periodic Hann of length 4: 0, 0.5, 1, 0.5.
+    match fftwin.coefficients(FftHann, 4, true)
+        Ok(w)  =>
+            test.assert_approx(w[0], 0.0, 1e-12)
+            test.assert_approx(w[1], 0.5, 1e-12)
+            test.assert_approx(w[2], 1.0, 1e-12)
+            test.assert_approx(w[3], 0.5, 1e-12)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_symmetric_and_periodic_samplings_differ_by_one_point()
+    // scipy's own trap: `get_window` is periodic and
+    // `signal.windows.hann` is symmetric.  Symmetric Hann of length 5
+    // is 0, 0.5, 1, 0.5, 0 — it comes back DOWN to zero — where the
+    // periodic one of the same length does not.  Neither is a default
+    // here.
+    match fftwin.coefficients(FftHann, 5, false)
+        Ok(w)  =>
+            test.assert_approx(w[0], 0.0, 1e-12)
+            test.assert_approx(w[2], 1.0, 1e-12)
+            test.assert_approx(w[4], 0.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftwin.coefficients(FftHann, 5, true)
+        Ok(w)  =>
+            test.assert_approx(w[0], 0.0, 1e-12)
+            // The periodic form never returns to zero at the end.
+            test.assert_eq(w[4] > 0.0, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_hamming_and_blackman_are_the_coefficients_the_textbook_prints()
+    // Hamming's ends are 0.54 - 0.46 = 0.08, which is the value that
+    // distinguishes it from Hann at a glance.
+    match fftwin.coefficients(FftHamming, 4, true)
+        Ok(w)  => test.assert_approx(w[0], 0.08, 1e-12)
+        Err(e) => test.fail(e.message())
+    // Blackman's ends are 0.42 - 0.5 + 0.08 = 0, to rounding.
+    match fftwin.coefficients(FftBlackman, 8, true)
+        Ok(w)  => test.assert_approx(w[0], 0.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // A Kaiser beta of 0 IS the rectangular window.
+    match fftwin.coefficients(FftKaiser(beta: 0.0), 4, true)
+        Ok(w)  => test.assert_approx(w[0], 1.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftwin.coefficients(FftKaiser(beta: -1.0), 4, true)
+        Ok(_)  => test.fail("a Kaiser beta is non-negative")
+        Err(e) =>
+            match e
+                FftBadBeta(_) => test.assert_eq(true, true)
+                _             => test.fail("expected FftBadBeta: ${e.message()}")
+    match fftwin.coefficients(FftHann, 0, true)
+        Ok(_)  => test.fail("a window has at least one point")
+        Err(e) =>
+            match e
+                FftBadWindowLength(n) => test.assert_eq(n, 0)
+                _                     => test.fail("expected FftBadWindowLength: ${e.message()}")
+
+@test
+fn test_applying_a_window_multiplies_and_the_two_gains_are_both_published()
+    match fftwin.apply(FftHann, [1.0, 1.0, 1.0, 1.0], true)
+        Ok(x)  =>
+            test.assert_approx(x[0], 0.0, 1e-12)
+            test.assert_approx(x[2], 1.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftwin.apply(FftKaiser(beta: -1.0), [1.0], true)
+        Ok(_)  => test.fail("a Kaiser beta is non-negative")
+        Err(_) => test.assert_eq(true, true)
+    // The rectangular window's coherent gain is its length and its
+    // noise gain is too, which is the one case where the two agree —
+    // and is exactly why a package that published only one of them
+    // would look correct until somebody windowed something.
+    match fftwin.coherent_gain(FftRectangular, 4, true)
+        Ok(g)  => test.assert_approx(g, 4.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftwin.noise_gain(FftRectangular, 4, true)
+        Ok(g)  => test.assert_approx(g, 4.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // Under Hann they differ: the sum is 2 and the sum of squares 1.5.
+    match fftwin.coherent_gain(FftHann, 4, true)
+        Ok(g)  => test.assert_approx(g, 2.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftwin.noise_gain(FftHann, 4, true)
+        Ok(g)  => test.assert_approx(g, 1.5, 1e-12)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_window_is_named_the_way_scipy_names_it()
+    test.assert_eq(fftwin.name(FftRectangular), "rectangular")
+    test.assert_eq(fftwin.name(FftHann), "hann")
+    test.assert_eq(fftwin.name(FftHamming), "hamming")
+    test.assert_eq(fftwin.name(FftBlackman), "blackman")
+
+// ── the spectrum helpers ────────────────────────────────────────────
+
+@test
+fn test_magnitude_and_phase_are_the_polar_form_of_each_bin()
+    // 3 + 4i has magnitude 5, which is the one complex number everybody
+    // can check in their head.
+    match fftspec.magnitude([3.0, 4.0])
+        Ok(m)  => test.assert_approx(m[0], 5.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftspec.magnitude_squared([3.0, 4.0])
+        Ok(m)  => test.assert_approx(m[0], 25.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // A bin on the positive real axis has no phase at all; one on the
+    // positive imaginary axis is a quarter turn round.
+    match fftspec.phase([1.0, 0.0, 0.0, 1.0])
+        Ok(ph) =>
+            test.assert_approx(ph[0], 0.0, 1e-12)
+            test.assert_approx(ph[1], 1.5707963267948966, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftspec.magnitude([1.0, 2.0, 3.0])
+        Ok(_)  => test.fail("an interleaved buffer has an even length")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_the_power_spectrum_takes_its_window_correction_as_an_argument()
+    // 1.0 means "I did not window", which is a perfectly good answer
+    // and is why this package will not guess.
+    match fftspec.power([2.0, 0.0], 2, 1.0)
+        Ok(p)  => test.assert_eq(p.len(), 1)
+        Err(e) => test.fail(e.message())
+    match fftspec.power([2.0, 0.0], 0, 1.0)
+        Ok(_)  => test.fail("a transform length is positive")
+        Err(_) => test.assert_eq(true, true)
+    match fftspec.power([2.0, 0.0], 2, 0.0)
+        Ok(_)  => test.fail("a window gain is a divisor")
+        Err(_) => test.assert_eq(true, true)
+    // A ratio of 1 is 0 dB and a ratio of 100 is 20 dB, which are the
+    // two numbers anybody checking a decibel conversion reaches for.
+    match fftspec.to_db([1.0, 100.0], 1.0)
+        Ok(db) =>
+            test.assert_approx(db[0], 0.0, 1e-12)
+            test.assert_approx(db[1], 20.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftspec.to_db([1.0], 0.0)
+        Ok(_)  => test.fail("a decibel reference is positive")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_the_shift_pair_invert_each_other_and_are_not_the_same_function()
+    // For an odd number of bins the two rotations differ by one, which
+    // is why numpy has both and why this package does too.
+    match fftspec.fftshift([0.0, 0.0, 1.0, 0.0, 2.0, 0.0])
+        Ok(s)  =>
+            test.assert_eq(s.len(), 6)
+            match fftspec.ifftshift(s)
+                Ok(back) =>
+                    test.assert_approx(back[0], 0.0, 1e-12)
+                    test.assert_approx(back[2], 1.0, 1e-12)
+                    test.assert_approx(back[4], 2.0, 1e-12)
+                Err(e)   => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+    match fftspec.fftshift([1.0, 2.0, 3.0])
+        Ok(_)  => test.fail("an interleaved buffer has an even length")
+        Err(_) => test.assert_eq(true, true)
+    match fftspec.ifftshift([1.0, 2.0, 3.0])
+        Ok(_)  => test.fail("an interleaved buffer has an even length")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_the_full_frequency_axis_puts_the_negative_frequencies_last()
+    // numpy's fftfreq for four samples at 4 Hz: 0, 1, -2, -1.
+    match fftspec.fftfreq(4, 4.0)
+        Ok(f)  =>
+            test.assert_eq(f.len(), 4)
+            test.assert_approx(f[0], 0.0, 1e-12)
+            test.assert_approx(f[1], 1.0, 1e-12)
+            test.assert_approx(f[2], -2.0, 1e-12)
+            test.assert_approx(f[3], -1.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match fftspec.fftfreq(4, 0.0)
+        Ok(_)  => test.fail("a rate is a divisor here")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_the_peak_finder_answers_an_index_and_refines_it_to_a_frequency()
+    // Bin 1 is the largest, and an empty spectrum has no peak — which
+    // is an optional rather than -1, because -1 is an index somebody
+    // will use.
+    match fftspec.peak_bin([1.0, 0.0, 5.0, 0.0, 2.0, 0.0])
+        Ok(maybe) =>
+            match maybe
+                Some(i) => test.assert_eq(i, 1)
+                None    => test.fail("this spectrum has a peak")
+        Err(e)    => test.fail(e.message())
+    match fftspec.peak_bin([])
+        Ok(maybe) =>
+            match maybe
+                Some(_) => test.fail("an empty spectrum has no peak")
+                None    => test.assert_eq(true, true)
+        Err(e)    => test.fail(e.message())
+    // A peak at bin 1 of a four-point transform at 4 Hz is at 1 Hz
+    // before refinement, and the parabola moves it by less than half a
+    // bin.
+    match fftspec.peak_frequency([1.0, 0.0, 5.0, 0.0, 2.0, 0.0, 1.0, 0.0], 4, 4.0)
+        Ok(maybe) =>
+            match maybe
+                Some(f) => test.assert_eq(f > 0.5 and f < 1.5, true)
+                None    => test.fail("this spectrum has a peak")
+        Err(e)    => test.fail(e.message())
+    match fftspec.peak_frequency([1.0, 0.0], 1, 0.0)
+        Ok(_)  => test.fail("a rate is a divisor here")
+        Err(_) => test.assert_eq(true, true)
+
+// ── two dimensions ──────────────────────────────────────────────────
+
+@test
+fn test_a_complex_matrix_is_a_trailing_axis_of_two()
+    // `[r, c]` real becomes `[r, c, 2]` complex, which is the same
+    // interleaving the 1-D side uses, spelled as a shape.
+    match ndfloat.zeros([2, 3])
+        Ok(m)  =>
+            match fft2d.of_real(m)
+                Ok(c)  =>
+                    test.assert_eq(ndfloat.rank(c), 3)
+                    // 2 × 3 complex is 12 floats: the trailing axis of
+                    // two is where the imaginary parts went.
+                    test.assert_eq(ndfloat.size(c), 12)
+                    match fft2d.complex_shape(c)
+                        Ok(s)  => test.assert_eq(s, [2, 3])
+                        Err(e) => test.fail(e.message())
+                    match fft2d.real_part(c)
+                        Ok(r)  => test.assert_eq(ndfloat.rank(r), 2)
+                        Err(e) => test.fail(e.message())
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+    // A rank-1 array is not a matrix.
+    match ndfloat.zeros([4])
+        Ok(v)  =>
+            match fft2d.of_real(v)
+                Ok(_)  => test.fail("a 2-D transform wants a matrix")
+                Err(e) =>
+                    match e
+                        FftNotMatrix(r) => test.assert_eq(r, 1)
+                        _               => test.fail("expected FftNotMatrix: ${e.message()}")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_two_dimensional_transform_takes_a_plan_for_each_axis()
+    // A square matrix uses one plan twice, which is why the pair is two
+    // arguments rather than a type of its own.
+    match ndfloat.zeros([2, 2, 2])
+        Ok(m)  =>
+            match fftplan.of_len(2)
+                Ok(p)  =>
+                    match fft2d.forward(p, p, m, FftNormNone)
+                        Ok(out) =>
+                            test.assert_eq(ndfloat.rank(out), 3)
+                            match fft2d.inverse(p, p, out, FftNormBackward)
+                                Ok(back) => test.assert_eq(ndfloat.rank(back), 3)
+                                Err(e)   => test.fail(e.message())
+                            match fft2d.magnitude(out)
+                                Ok(mag) => test.assert_eq(ndfloat.rank(mag), 2)
+                                Err(e)  => test.fail(e.message())
+                            match fft2d.fftshift(out)
+                                Ok(s)  =>
+                                    match fft2d.ifftshift(s)
+                                        Ok(u)  => test.assert_eq(ndfloat.rank(u), 3)
+                                        Err(e) => test.fail(e.message())
+                                Err(e) => test.fail(e.message())
+                        Err(e)  => test.fail(e.message())
+                    // One axis at a time, which is half the work of a
+                    // full 2-D transform for a separable filter.
+                    match fft2d.forward_axis(p, m, 1, FftNormNone)
+                        Ok(rows) =>
+                            match fft2d.inverse_axis(p, rows, 1, FftNormBackward)
+                                Ok(back) => test.assert_eq(ndfloat.rank(back), 3)
+                                Err(e)   => test.fail(e.message())
+                        Err(e)   => test.fail(e.message())
+                    match fft2d.forward_axis(p, m, 5, FftNormNone)
+                        Ok(_)  => test.fail("a matrix has two axes")
+                        Err(e) =>
+                            match e
+                                FftBadAxis(a, r) =>
+                                    test.assert_eq(a, 5)
+                                    test.assert_eq(r, 2)
+                                _                => test.fail("expected FftBadAxis: ${e.message()}")
+                Err(e) => test.fail(e.message())
+            // A plan pair that does not match the matrix names all four
+            // numbers, because "shape mismatch" without them is a
+            // message a reader has to reproduce to act on.
+            match fftplan.of_len(4)
+                Ok(wrong) =>
+                    match fft2d.forward(wrong, wrong, m, FftNormNone)
+                        Ok(_)  => test.fail("the plans are for four points")
+                        Err(e) =>
+                            match e
+                                FftShapeMismatch(r, c, gr, gc) =>
+                                    test.assert_eq(r, 4)
+                                    test.assert_eq(c, 4)
+                                    test.assert_eq(gr, 2)
+                                    test.assert_eq(gc, 2)
+                                _                              => test.fail("expected FftShapeMismatch: ${e.message()}")
+                    match fft2d.inverse(wrong, wrong, m, FftNormNone)
+                        Ok(_)  => test.fail("the plans are for four points")
+                        Err(_) => test.assert_eq(true, true)
+                Err(e)    => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+// ── the device module ───────────────────────────────────────────────
+
+@test
+fn test_the_fixed_widths_are_the_two_a_sensor_pipeline_uses()
+    test.assert_eq(fftfix.FFTFIX_C64_POINTS, 64)
+    test.assert_eq(fftfix.FFTFIX_C256_POINTS, 256)
+
+@test
+fn test_a_fixed_buffer_is_filled_one_reading_at_a_time()
+    // The shape an interrupt handler uses: a zeroed value, then a
+    // setter per ADC reading, and nothing allocated anywhere.
+    var b = fftfix.c64_zero()
+    test.assert_approx(fftfix.c64_re_at(b, 0), 0.0, 1e-12)
+    b = fftfix.c64_with_real(b, 0, 1.0)
+    test.assert_approx(fftfix.c64_re_at(b, 0), 1.0, 1e-12)
+    test.assert_approx(fftfix.c64_im_at(b, 0), 0.0, 1e-12)
+    b = fftfix.c64_with(b, 1, 2.0, 3.0)
+    test.assert_approx(fftfix.c64_re_at(b, 1), 2.0, 1e-12)
+    test.assert_approx(fftfix.c64_im_at(b, 1), 3.0, 1e-12)
+    // Out of range answers a zero and leaves the buffer alone, because
+    // a device that traps in an interrupt handler is a device that
+    // reboots.
+    test.assert_approx(fftfix.c64_re_at(b, 999), 0.0, 1e-12)
+    test.assert_approx(fftfix.c64_im_at(b, 999), 0.0, 1e-12)
+    let unchanged = fftfix.c64_with_real(b, 999, 7.0)
+    test.assert_approx(fftfix.c64_re_at(unchanged, 0), 1.0, 1e-12)
+
+@test
+fn test_the_fixed_transform_of_a_single_impulse_is_a_flat_spectrum()
+    // The same exact case the host module is checked on, at a fixed
+    // width: one non-zero sample gives every bin the same magnitude.
+    var b = fftfix.c64_zero()
+    b = fftfix.c64_with_real(b, 0, 1.0)
+    b = fftfix.c64_forward(b)
+    test.assert_approx(fftfix.c64_re_at(b, 0), 1.0, 1e-12)
+    test.assert_approx(fftfix.c64_re_at(b, 7), 1.0, 1e-12)
+    test.assert_approx(fftfix.c64_power_at(b, 3), 1.0, 1e-12)
+    test.assert_approx(fftfix.c64_power_at(b, 999), 0.0, 1e-12)
+    // Forward then inverse is the identity: the device inverse carries
+    // the factor of 64, because there is no normalisation argument.
+    b = fftfix.c64_inverse(b)
+    test.assert_approx(fftfix.c64_re_at(b, 0), 1.0, 1e-12)
+    test.assert_approx(fftfix.c64_re_at(b, 1), 0.0, 1e-12)
+
+@test
+fn test_the_fixed_peak_finder_skips_dc_and_the_mirrored_half()
+    // An accelerometer's DC component is gravity and it is larger than
+    // everything a fault detector looks for, so bin 0 is excluded; the
+    // upper half is a mirror, so it is too.
+    var b = fftfix.c64_zero()
+    b = fftfix.c64_with_real(b, 0, 1.0)
+    b = fftfix.c64_with_real(b, 1, 1.0)
+    b = fftfix.c64_forward(b)
+    let peak = fftfix.c64_peak_bin(b)
+    test.assert_eq(peak > 0, true)
+    test.assert_eq(peak < 32, true)
+
+@test
+fn test_the_wide_fixed_width_has_the_same_shape_at_four_times_the_size()
+    var b = fftfix.c256_zero()
+    test.assert_approx(fftfix.c256_re_at(b, 0), 0.0, 1e-12)
+    b = fftfix.c256_with_real(b, 0, 1.0)
+    b = fftfix.c256_with(b, 1, 0.0, 2.0)
+    test.assert_approx(fftfix.c256_im_at(b, 1), 2.0, 1e-12)
+    test.assert_approx(fftfix.c256_re_at(b, 999), 0.0, 1e-12)
+    test.assert_approx(fftfix.c256_im_at(b, 999), 0.0, 1e-12)
+    b = fftfix.c256_forward(b)
+    test.assert_approx(fftfix.c256_power_at(b, 999), 0.0, 1e-12)
+    let peak = fftfix.c256_peak_bin(b)
+    test.assert_eq(peak >= 0, true)
+    test.assert_eq(peak < 128, true)
+    b = fftfix.c256_inverse(b)
+    test.assert_approx(fftfix.c256_re_at(b, 0), 1.0, 1e-12)
+
+// ── the refusals ────────────────────────────────────────────────────
+
+@test
+fn test_a_shape_disagreement_and_a_bad_parameter_are_told_apart()
+    // What a caller does next is different: a shape disagreement means
+    // rebuild the plan or reslice the buffer, a bad parameter means the
+    // calling code is wrong.
+    test.assert_eq(fftfault.is_shape_fault(FftLengthMismatch(want: 8, got: 4)), true)
+    test.assert_eq(fftfault.is_shape_fault(FftOddInterleave(floats: 3)), true)
+    test.assert_eq(fftfault.is_shape_fault(FftFixedWidth(want: 64, got: 32)), true)
+    test.assert_eq(fftfault.is_shape_fault(FftNotPowerOfTwo(len: 3)), true)
+    test.assert_eq(fftfault.is_shape_fault(FftNotMatrix(rank: 1)), true)
+    test.assert_eq(fftfault.is_shape_fault(FftBadAxis(axis: 5, rank: 2)), true)
+    test.assert_eq(fftfault.is_shape_fault(FftBadBeta(beta: -1.0)), false)
+    test.assert_eq(fftfault.is_shape_fault(FftBadSampleRate(rate: 0.0)), false)
+    test.assert_eq(fftfault.is_shape_fault(FftBadWindowLength(len: 0)), false)
+    let e = FftShapeMismatch(rows: 4, cols: 4, got_rows: 2, got_cols: 2)
+    test.assert_eq(fftfault.is_shape_fault(e), true)
+    test.assert_eq(e.message().len() > 0, true)

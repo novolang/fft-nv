@@ -1,0 +1,222 @@
+// fftplan — the plan, which is this package's load-bearing interface.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A PLAN IS AND WHY IT IS A VALUE.  An FFT of length n needs the
+// n complex roots of unity and, for the power-of-two case, the
+// bit-reversal permutation that puts the input in the order the
+// butterflies read it.  Both depend on n alone — not on the data — so
+// computing them once and reusing them across every window of a stream
+// is the whole difference between a transform that is affordable in a
+// loop and one that is not.  A spectrogram over a ten-minute recording
+// runs one plan across six thousand windows.
+//
+// rustfft calls this a plan and hands out a boxed trait object from a
+// planner that also caches.  Here it is a plain VALUE: `of_len` answers
+// an `FftPlan`, the caller keeps it as long as the length lives, and
+// every transform is a pure function of it.  It can sit in a struct
+// beside the sample rate it belongs to, be copied, be used from two
+// threads, and it cannot be stale — because nothing mutates it.  There
+// is no planner and no cache, because a value the caller holds IS the
+// cache and it is one they can see.
+//
+// THE THREE ALGORITHMS, AND WHY THE CHOICE IS THE PLAN'S.  Radix-2 for
+// a power of two; mixed-radix (Cooley-Tukey over the factors) for a
+// composite length; Bluestein's chirp-z for a prime one, which turns a
+// length-n DFT into a convolution of length at least 2n-1 that is
+// itself a power of two.  A caller does not choose: `of_len` factors
+// the length and picks, `algorithm` says what it picked, and
+// `inner_len` says how big Bluestein's convolution is — because that
+// number is the memory a prime length costs and a caller sizing a
+// device buffer needs it before the transform runs, not after.
+//
+// NORMALISATION IS NOT IN THE PLAN.  It is an argument to the
+// transform, because the same plan serves a forward and an inverse and
+// the two scale differently, and because a caller doing a filter —
+// forward, multiply, inverse — wants no scaling at all on the way out
+// and then one division by n.  Putting it in the plan would have made
+// that caller build two.
+
+// FftNorm is where the factor of n goes.
+//
+// The DFT and its inverse differ by a factor of n, and every library
+// puts it somewhere different.  numpy and scipy put it on the inverse;
+// MATLAB agrees; FFTW puts it nowhere and tells the caller; a
+// unitary transform splits it.  All four are in use, so all four are
+// named here and none is a default — every transform takes one.
+pub enum FftNorm
+    // No scaling at all, in either direction.  A forward followed by an
+    // inverse multiplies by n.  FFTW's convention, and the one a filter
+    // wants: scale once at the end rather than twice in the middle.
+    FftNormNone
+    // Divide by n on the FORWARD transform and leave the inverse alone.
+    FftNormForward
+    // Divide by n on the INVERSE transform and leave the forward alone.
+    // numpy's and scipy's default, so it is the one a notebook ported
+    // from Python wants.
+    FftNormBackward
+    // Divide by the square root of n in BOTH directions, which makes
+    // the transform unitary: Parseval's identity holds with no factor,
+    // and the round trip is the identity.  The convention a physicist
+    // reaches for.
+    FftNormOrtho
+
+// FftAlgo is which algorithm a plan chose for its length.
+//
+// Published because it is the difference between a transform that costs
+// `n log n` with a small constant and one that costs several times
+// that, and a caller choosing a window size wants to know that 1024 is
+// radix-2 and 1021 is Bluestein before they pick.
+pub enum FftAlgo
+    // A power of two: the radix-2 decimation-in-time butterflies, with
+    // a bit-reversal permutation first.  The fast path.
+    FftRadix2(log2_len: Int)
+    // A composite length: Cooley-Tukey over its factors, smallest
+    // first.  `factors` is the factorisation the plan will use, which
+    // is what makes the cost readable — 1000 is 2·2·2·5·5·5 and cheap;
+    // 1002 is 2·3·167 and has a length-167 DFT inside it.
+    FftMixedRadix(factors: [Int])
+    // A prime length, or a composite one with a large prime factor:
+    // Bluestein's chirp-z, which is a convolution of length
+    // `inner_len` — the next power of two at or above `2 * len - 1`.
+    FftBluestein(inner_len: Int)
+
+// FftPlan is everything about one transform length, computed once.
+//
+// Build it with `of_len`, keep it, and pass it to every transform of
+// that length.  It is a value: it can live in a struct, be copied, and
+// be used from two places, and nothing about it changes after
+// construction.
+//
+// The fields are public because a reader checking this implementation
+// against rustfft needs to see what was precomputed, and because a test
+// can then assert the factorisation directly rather than only through
+// a transform.
+//
+// ```novo
+// use fftplan
+//
+// fn main() [io]
+//     match fftplan.of_len(1024)
+//         Ok(p)  => println("${fftplan.len(p)}")   // 1024
+//         Err(e) => println(e.message())
+// ```
+pub struct FftPlan
+    // How many COMPLEX points this plan transforms.  An interleaved
+    // buffer for it holds twice this many floats.
+    points: Int
+    // Which algorithm the length chose.
+    algo: FftAlgo
+    // The twiddle factors, interleaved `[re, im, …]`: the roots of
+    // unity the butterflies multiply by.  The list a caller never reads
+    // and an implementation reads constantly.
+    twiddles: [Float]
+    // The bit-reversal permutation, for a radix-2 plan, and empty for
+    // every other algorithm.  `perm[i]` is where input `i` goes.
+    perm: [Int]
+
+// The plan for a transform of `points` complex samples.
+//
+// Factors the length, picks the algorithm, and precomputes the twiddle
+// factors and — for a power of two — the permutation.  This is the
+// expensive call, and the whole reason it is separate from the
+// transform is that it is expensive.
+//
+// `FftZeroLength` for a length that is zero or negative, which is the
+// only thing it refuses: every positive length has a transform, by
+// Bluestein if by nothing else.
+//
+// ```novo
+// use fftplan
+//
+// fn main() [io]
+//     match fftplan.of_len(1024)
+//         Ok(p) =>
+//             match fftplan.algorithm(p)
+//                 FftRadix2(k)        => println("radix-2, 2^${k}")
+//                 FftMixedRadix(_)    => println("mixed radix")
+//                 FftBluestein(_)     => println("bluestein")
+//         Err(e) => println(e.message())
+// ```
+pub fn of_len(points: Int) -> Result<FftPlan, FftFault> []
+    todo("fft-nv.fftplan.of_len")
+
+// How many complex points the plan transforms.
+pub fn len(p: FftPlan) -> Int []
+    todo("fft-nv.fftplan.len")
+
+// How many floats an interleaved buffer for this plan holds: twice
+// `len`.
+//
+// Named rather than left as a multiplication a caller writes, because
+// the factor of two between points and floats is the single most
+// common mistake an interleaved API invites.
+pub fn float_len(p: FftPlan) -> Int []
+    todo("fft-nv.fftplan.float_len")
+
+// Which algorithm this length chose.
+pub fn algorithm(p: FftPlan) -> FftAlgo []
+    todo("fft-nv.fftplan.algorithm")
+
+// The inner convolution length a Bluestein plan uses, and `len` for
+// every other algorithm.
+//
+// The memory a prime length costs, which a caller sizing a buffer needs
+// before the transform runs rather than after: a 1021-point transform
+// carries a 2048-point convolution inside it, so it is four times the
+// working set of the 1024-point transform beside it.
+pub fn inner_len(p: FftPlan) -> Int []
+    todo("fft-nv.fftplan.inner_len")
+
+// Whether the length is a power of two, which is the question behind
+// "will this be fast".
+//
+// Answerable from the length alone, so it takes an `Int` rather than a
+// plan: a caller CHOOSING a window size asks this before building
+// anything.
+//
+// ```novo
+// use fftplan
+//
+// fn main() [io]
+//     println("${fftplan.is_power_of_two(1024)} ${fftplan.is_power_of_two(1000)}")
+//     // true false
+// ```
+pub fn is_power_of_two(points: Int) -> Bool []
+    todo("fft-nv.fftplan.is_power_of_two")
+
+// The smallest power of two at or above `points`.
+//
+// What a caller pads a window to when they want the radix-2 path, and
+// what Bluestein's inner length is computed from.
+pub fn next_power_of_two(points: Int) -> Int []
+    todo("fft-nv.fftplan.next_power_of_two")
+
+// The prime factorisation a mixed-radix plan would use, smallest factor
+// first.
+//
+// Answerable from the length alone, and published because it is what
+// makes a cost readable before anything is built: 1000 factors to
+// 2·2·2·5·5·5 and every step is a small DFT; 1002 factors to 2·3·167
+// and carries a length-167 DFT in the middle.
+pub fn factors(points: Int) -> [Int] []
+    todo("fft-nv.fftplan.factors")
+
+// The scale factor a transform applies, for this normalisation, this
+// length and this direction.
+//
+// Published so a caller can undo one convention and apply another
+// without rerunning a transform, and so a test can assert the four
+// conventions against each other rather than against four hard-coded
+// numbers.
+//
+// ```novo
+// use fftplan
+//
+// fn main() [io]
+//     println("${fftplan.scale(FftNormBackward, 4, true)}")    // 1
+//     println("${fftplan.scale(FftNormBackward, 4, false)}")   // 0.25
+// ```
+pub fn scale(norm: FftNorm, points: Int, forward: Bool) -> Float []
+    todo("fft-nv.fftplan.scale")

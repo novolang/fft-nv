@@ -1,0 +1,226 @@
+// fftfix — the fixed-length radix-2 transform, which is the half of
+// this package that reaches a microcontroller.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY A SECOND MODULE.  `fftcx`, `fftreal`, `fftwin`, `fftspec` and
+// `fft2d` speak `[Float]`, `Str` and ndarray-nv's matrices, and none of those links
+// at `@tier(embedded)`: a list is a heap allocation and the embedded
+// runtime defines no allocator, so a device that called one would fail
+// at the linker rather than at the type checker.  One host-only function
+// anywhere in a compilation unit is an undefined symbol on a device
+// whether or not the firmware calls it, so the half a device uses is
+// its own module — and it takes and returns `@value` structs whose
+// arrays are inline (SPEC § 14.4), which is 1 KB of stack and no
+// allocation at all.
+//
+// THE CONSUMER IS REAL, WHICH IS THE CONDITION FOR MAKING THE CLAIM.  A
+// sensor node samples an accelerometer at a kilohertz, fills a 64-point
+// window, transforms it, and looks at where the energy is — a bearing
+// that has started to fail rings at a frequency a threshold can watch
+// for.  The whole pipeline is a fixed-size buffer, a radix-2 butterfly
+// and a comparison, and there is no point in any of it where something
+// has to be allocated.  `tests/embedded_probe.nv` is that pipeline
+// compiled for a Cortex-M4.
+//
+// TWO WIDTHS, AND WHY NOT A FAMILY.  A `@value` struct's array length
+// is part of its type and cannot be a parameter, so every width is a
+// TYPE and costs a full set of functions.  64 points is the fast loop —
+// a few hundred microseconds at 64 MHz, and 15 Hz resolution at a 1 kHz
+// sample rate.  256 is the one a vibration monitor wants, at four times
+// the cost and four times the resolution.  A third would be a third
+// copy of everything for a resolution somebody can get by decimating,
+// so there are two.
+//
+// "IN PLACE" IS VALUE IN, VALUE OUT, and on a device that matters more
+// than it does on a host: `b = fftfix.c64_forward(b)` with no other
+// binding live is a Perceus reuse, and a `@value` struct has no
+// refcount to check — it is a stack slot that gets written over.  The
+// signature is the same shape the host module's is, which is the point:
+// the same code reads the same way at both ends.
+//
+// THIS MODULE NAMES NO TYPE FROM ANOTHER ONE, and that is a structural
+// requirement rather than a style: the device build compiles this file
+// and whatever its `use` lines reach, so a normalisation enum borrowed
+// from `fftplan` would have dragged `fftplan` — and its `[Float]`
+// fields — onto a target with no allocator.  `c64_forward` is
+// unscaled and `c64_inverse` carries the factor; see those two.
+//
+// NO WINDOWING HERE, AND THAT IS DELIBERATE.  `fftwin` builds a
+// coefficient LIST, which a device cannot have.  A device that wants a
+// Hann window compiles the 64 coefficients in as a constant table of
+// its own and multiplies — which is four lines in the firmware and
+// needs nothing from this package.  Putting a window generator here
+// would mean a trigonometric table this module cannot hold.
+
+// How many complex points `FftC64` transforms.
+pub const FFTFIX_C64_POINTS = 64
+
+// How many complex points `FftC256` transforms.
+pub const FFTFIX_C256_POINTS = 256
+
+// FftC64 is 64 complex samples, inline: two arrays of 64 floats each,
+// stored in the struct itself.
+//
+// `[Float; 64]` inside a `@value` struct is a true inline array
+// (SPEC § 14.4): 64 words in the struct, on the stack, with no header
+// and no cell.  Two of them is 1 KB, which a Cortex-M4 with 64 KB of
+// RAM can hold twice over and still run its stack.
+//
+// Separate real and imaginary arrays rather than one interleaved array
+// of 128, because a butterfly reads and writes both halves of a pair at
+// once and two arrays index that with one offset rather than two.
+//
+// ```novo
+// use fftfix
+//
+// fn main() [io]
+//     println("${fftfix.FFTFIX_C64_POINTS}")   // 64
+// ```
+pub @value
+struct FftC64
+    // The real parts, sample 0 first.
+    re: [Float; 64]
+    // The imaginary parts.  Zero throughout for a real input, which is
+    // what a window filled with `c64_with_real` holds.
+    im: [Float; 64]
+
+// FftC256 is 256 complex samples, inline.  4 KB of stack, and the same
+// shape as `FftC64` at four times the width.
+pub @value
+struct FftC256
+    // The real parts, sample 0 first.
+    re: [Float; 256]
+    // The imaginary parts.
+    im: [Float; 256]
+
+// ── 64 points ───────────────────────────────────────────────────────
+
+// A zeroed 64-point buffer.
+//
+// The value a device starts a window from, and the one thing here that
+// takes no argument — so a firmware can declare a static of this type
+// without having a sample yet.
+pub fn c64_zero() -> FftC64 []
+    todo("fft-nv.fftfix.c64_zero")
+
+// The sample at index `i`, real part.
+//
+// An accessor rather than a public field read, because a field read of
+// an inline array from another module is a place the single-file build
+// has been known to lose the element type, and because a device filling
+// a window one ADC reading at a time wants a bounds-checked setter
+// beside it.  Out of range answers 0.
+pub fn c64_re_at(b: FftC64, i: Int) -> Float []
+    todo("fft-nv.fftfix.c64_re_at")
+
+// The sample at index `i`, imaginary part.  Out of range answers 0.
+pub fn c64_im_at(b: FftC64, i: Int) -> Float []
+    todo("fft-nv.fftfix.c64_im_at")
+
+// The buffer with sample `i` set to a real value and its imaginary part
+// zeroed.
+//
+// The call an interrupt handler makes once per ADC reading.  An index
+// out of range answers the buffer unchanged rather than trapping,
+// because a device that traps in an interrupt handler is a device that
+// reboots.
+pub fn c64_with_real(b: FftC64, i: Int, value: Float) -> FftC64 []
+    todo("fft-nv.fftfix.c64_with_real")
+
+// The buffer with sample `i` set to a complex value.
+pub fn c64_with(b: FftC64, i: Int, re: Float, im: Float) -> FftC64 []
+    todo("fft-nv.fftfix.c64_with")
+
+// The forward 64-point radix-2 transform.
+//
+// Decimation in time: bit-reverse the input order, then six stages of
+// butterflies.  The twiddle factors are compiled in as a constant
+// table of 32 pairs rather than computed, because a device has no
+// business calling `cos` at run time and because the table is 512 bytes
+// of flash.
+//
+// Total — there is no length to disagree about, which is the whole
+// point of a fixed-width type.
+//
+// UNSCALED, and there is no normalisation argument.  Two reasons, and
+// both are about the device: a threshold that compares bin powers does
+// not care about a constant factor, and a scale argument would be a
+// branch inside the only loop on this path.  `c64_inverse` is where the
+// factor of 64 goes, so the round trip is the identity and nothing else
+// has to know.  The host modules take an `FftNorm` because a notebook
+// comparing a spectrum with numpy's genuinely needs the convention
+// named; the README says so under "What the device module does
+// differently".
+pub fn c64_forward(b: FftC64) -> FftC64 []
+    todo("fft-nv.fftfix.c64_forward")
+
+// The inverse 64-point transform, scaled by 1/64 so that the round
+// trip is the identity.  Total, for the same reason.
+pub fn c64_inverse(b: FftC64) -> FftC64 []
+    todo("fft-nv.fftfix.c64_inverse")
+
+// The squared magnitude of bin `i`: `re² + im²`.
+//
+// Squared and not rooted, because the comparison a threshold makes is
+// the same either way and a square root is a library call a device pays
+// for.  Out of range answers 0.
+pub fn c64_power_at(b: FftC64, i: Int) -> Float []
+    todo("fft-nv.fftfix.c64_power_at")
+
+// The index of the largest-magnitude bin in the first half of the
+// spectrum.
+//
+// The first half, because a real input's spectrum is symmetric and the
+// upper half is its mirror — a peak finder over the whole 64 would
+// report bin 63 as often as bin 1.  This is the answer a sensor
+// pipeline actually wants: which frequency is this machine ringing at.
+//
+// Bin 0 — the DC term — is EXCLUDED, because an accelerometer's DC
+// component is gravity and it is larger than everything a fault
+// detector is looking for.
+pub fn c64_peak_bin(b: FftC64) -> Int []
+    todo("fft-nv.fftfix.c64_peak_bin")
+
+// ── 256 points ──────────────────────────────────────────────────────
+
+// A zeroed 256-point buffer.
+pub fn c256_zero() -> FftC256 []
+    todo("fft-nv.fftfix.c256_zero")
+
+// The sample at index `i`, real part.  Out of range answers 0.
+pub fn c256_re_at(b: FftC256, i: Int) -> Float []
+    todo("fft-nv.fftfix.c256_re_at")
+
+// The sample at index `i`, imaginary part.  Out of range answers 0.
+pub fn c256_im_at(b: FftC256, i: Int) -> Float []
+    todo("fft-nv.fftfix.c256_im_at")
+
+// The buffer with sample `i` set to a real value and its imaginary part
+// zeroed.  An index out of range answers the buffer unchanged.
+pub fn c256_with_real(b: FftC256, i: Int, value: Float) -> FftC256 []
+    todo("fft-nv.fftfix.c256_with_real")
+
+// The buffer with sample `i` set to a complex value.
+pub fn c256_with(b: FftC256, i: Int, re: Float, im: Float) -> FftC256 []
+    todo("fft-nv.fftfix.c256_with")
+
+// The forward 256-point radix-2 transform: eight stages of butterflies
+// over a 128-entry twiddle table.  Total, and unscaled for the reason
+// `c64_forward` gives.
+pub fn c256_forward(b: FftC256) -> FftC256 []
+    todo("fft-nv.fftfix.c256_forward")
+
+// The inverse 256-point transform, scaled by 1/256.  Total.
+pub fn c256_inverse(b: FftC256) -> FftC256 []
+    todo("fft-nv.fftfix.c256_inverse")
+
+// The squared magnitude of bin `i`.  Out of range answers 0.
+pub fn c256_power_at(b: FftC256, i: Int) -> Float []
+    todo("fft-nv.fftfix.c256_power_at")
+
+// The index of the largest-magnitude bin in the first half, excluding
+// bin 0.  The same rule and the same reason as the 64-point form.
+pub fn c256_peak_bin(b: FftC256) -> Int []
+    todo("fft-nv.fftfix.c256_peak_bin")

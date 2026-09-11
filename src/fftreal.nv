@@ -1,0 +1,128 @@
+// fftreal — the real-input transform, which answers half a spectrum
+// because the other half is a copy.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY HALF.  The DFT of a real signal is conjugate-symmetric: bin
+// `n - k` is the complex conjugate of bin `k`.  So the second half of
+// the output carries no information the first half does not, and
+// computing it is work thrown away.  `forward` answers `n/2 + 1`
+// complex bins — 0 through n/2 inclusive — which is scipy's `rfft` and
+// numpy's, and which is the layout every real spectrum in a notebook
+// is in.
+//
+// THE PLUS ONE IS NOT AN OFF-BY-ONE.  Bin 0 is the DC term and bin
+// `n/2` is the Nyquist term; both are their own conjugates, so both are
+// REAL, and both are in the answer.  A 1024-point real transform gives
+// 513 bins, not 512, and a caller who allocated 512 has written the bug
+// this sentence exists to prevent.  `bin_count` is the function that
+// answers it so nobody has to remember.
+//
+// EVEN LENGTHS ONLY.  A real transform of an odd length has no Nyquist
+// bin and `n/2 + 1` stops meaning what it says; scipy handles it and
+// this package refuses it, because a window length is a caller's choice
+// and every windowing scheme in practice picks an even one.  The
+// refusal is `FftNotPowerOfTwo`'s neighbour rather than a silent
+// widening.
+
+// How many complex bins the real transform of `points` real samples
+// answers: `points / 2 + 1`.
+//
+// The plus one is the Nyquist bin, and it is why this is a function
+// rather than a division a caller writes.  See the module comment.
+//
+// ```novo
+// use fftreal
+//
+// fn main() [io]
+//     println("${fftreal.bin_count(1024)}")   // 513
+// ```
+pub fn bin_count(points: Int) -> Int []
+    todo("fft-nv.fftreal.bin_count")
+
+// The forward transform of real samples, answering the half spectrum
+// interleaved.
+//
+// `samples` is `fftplan.len(p)` real floats; the answer is
+// `2 * bin_count(len)` floats, interleaved, with bin `k` at
+// `[2k, 2k + 1]`.  Bin 0 and bin `n/2` have zero imaginary parts by
+// construction.
+//
+// `FftLengthMismatch` when the sample count is not the plan's.  The
+// plan is an ORDINARY `FftPlan` of the full length rather than a
+// separate real-transform plan: the real algorithm runs a complex
+// transform of half the length and unpacks it, so the twiddles it needs
+// are the ones already there.
+//
+// ```novo
+// use fftplan
+// use fftreal
+//
+// fn main() [io]
+//     match fftplan.of_len(4)
+//         Ok(p) =>
+//             match fftreal.forward(p, [1.0, 1.0, 1.0, 1.0], FftNormNone)
+//                 Ok(out) => println("${out.len()}")   // 6 — three bins
+//                 Err(e)  => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn forward(p: FftPlan, samples: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftreal.forward")
+
+// The inverse of `forward`: a half spectrum back to real samples.
+//
+// `spectrum` is `2 * bin_count(len)` floats and the answer is
+// `fftplan.len(p)` real floats.  The imaginary parts of bin 0 and bin
+// `n/2` are IGNORED rather than refused — a caller who edited a
+// spectrum and left a rounding residue there should get their signal
+// back, not an error about a number that the symmetry says has to be
+// zero.
+//
+// `inverse(p, forward(p, x, FftNormNone), FftNormBackward)` is `x` to
+// within rounding.
+pub fn inverse(p: FftPlan, spectrum: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftreal.inverse")
+
+// The frequency, in hertz, of each bin of a real transform.
+//
+// `bin_count(points)` values, from 0 to the Nyquist frequency
+// `rate / 2` inclusive.  scipy's `rfftfreq`, and the x axis of every
+// spectrum plot a notebook draws.
+//
+// `FftBadSampleRate` for a rate that is zero or negative, and
+// `FftZeroLength` for a length that is.
+//
+// ```novo
+// use fftreal
+//
+// fn main() [io]
+//     match fftreal.rfftfreq(8, 8.0)
+//         Ok(f)  => println("${f[1]}")   // 1 — one hertz per bin here
+//         Err(e) => println(e.message())
+// ```
+pub fn rfftfreq(points: Int, rate: Float) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftreal.rfftfreq")
+
+// The full complex spectrum reconstructed from a half one.
+//
+// `2 * points` floats, with bin `n - k` set to the conjugate of bin
+// `k`.  The call a caller makes when something downstream wants the
+// symmetric form — a cross-correlation against a complex reference, a
+// plot that shows negative frequencies.
+//
+// `FftLengthMismatch` when the half spectrum is not `bin_count(points)`
+// bins long.
+pub fn to_full(spectrum: [Float], points: Int) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftreal.to_full")
+
+// The half spectrum taken out of a full complex one, discarding the
+// redundant half.
+//
+// The inverse of `to_full`, and the call that turns a
+// `fftcx.forward(of_real(x))` into what `forward` would have answered
+// for a quarter of the work.  The discarded half is NOT checked for
+// symmetry: a caller who transformed something that was not real gets
+// the first half of it, which is what they asked for.
+pub fn to_half(spectrum: [Float], points: Int) -> Result<[Float], FftFault> []
+    todo("fft-nv.fftreal.to_half")
