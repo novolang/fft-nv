@@ -1,304 +1,340 @@
 # fft-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+The discrete Fourier transform turns a sequence of samples into the
+amplitudes of the frequencies that make it up. The fast Fourier
+transform, or FFT, is an algorithm that computes it in `n log n` steps
+instead of `n²`. This package brings it to novo-lang, with the window
+functions and spectrum arithmetic that go with it. Its references are
+the Rust crate [rustfft](https://docs.rs/rustfft) and
+[`scipy.fft`](https://docs.scipy.org/doc/scipy/reference/fft.html). Its
+two-dimensional transforms read matrices from
+[ndarray-nv](https://novo-lang.org/packages/ndarray-nv).
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`. Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is declared
+with its full signature, but every body is a `todo()` that panics when
+called. The package is published so its design can be reviewed and
+depended on before it is implemented. Version 0.1.0 will be the first
+working release.
 
-## What this is
+## What the transform answers
 
-The fast Fourier transform, as a **plan built once per length** and run
-against as many buffers as you have: radix-2 for a power of two,
-mixed-radix over the factors for a composite length, and Bluestein's
-chirp-z for a prime one — so every positive length transforms and the
-plan tells you which of the three it chose and what it costs.
+A transform of `n` samples answers `n` **bins**. Bin `k` holds a complex
+number whose size is how much of frequency `k` the signal contains and
+whose angle is that frequency's phase. Frequency `k` is `k` cycles
+across the whole buffer, so with a sample rate the bins become hertz.
 
-Around that: the real-input transform that answers the half spectrum
-because the other half is a copy; 2-D transforms over ndarray-nv
-matrices; the four window functions a spectrum needs, with both gain
-corrections published because a tone and broadband noise need different
-ones; the frequency axes, power spectrum, decibel conversion, shift and
-peak finder a notebook reaches for; and a fixed-length module that
-compiles for a microcontroller.
+A **complex number** is held here as two floats side by side, the real
+part then the imaginary part. A buffer of `n` complex numbers is
+therefore a list of `2n` floats, called an **interleaved** buffer.
 
-It is for the program that has samples and wants frequencies: a
-spectrogram, an audio analyser, a convolution done the fast way, an
-image filtered in the frequency domain, a sensor node watching for the
-frequency a failing bearing rings at.
+The **inverse transform** turns bins back into samples. Forward followed
+by inverse is the original signal, up to a factor of `n` that somebody
+has to divide out. Which of the two directions carries that factor is a
+**normalisation** convention, and three different ones are in common
+use, so this package names all four and defaults to none.
+
+A **real** input, which is what a microphone or an accelerometer gives,
+has a spectrum whose second half is the mirror image of its first. The
+real transform therefore answers `n/2 + 1` bins and not `n`. The extra
+one is the **Nyquist bin**, at half the sample rate.
+
+A **window function** tapers a buffer towards zero at both ends. Without
+one, the join between the end of the buffer and the beginning of the
+next is a sharp step, and a sharp step spreads energy across every bin.
+A window removes some of the signal's energy, so a measurement made
+through one is divided by a **gain** to put it back. There are two
+gains: a **coherent** gain for a pure tone and a **noise** gain for
+broadband noise.
+
+A **plan** is the trigonometry a transform of one particular length
+needs: the roots of unity, and the permutation that puts the input in
+the order the algorithm reads it. It depends on the length alone and not
+on the data, so it is built once and used for every buffer of that
+length. A spectrogram of a ten-minute recording runs one plan across
+thousands of windows.
+
+Three algorithms cover every length, and the plan says which it chose.
+
+| Length | Algorithm | Cost |
+| --- | --- | --- |
+| a power of two | radix-2 | the cheapest case |
+| composite | mixed-radix over the factors | close to radix-2 |
+| prime | Bluestein's chirp-z | a convolution of a larger, power-of-two length |
+
+## Install
 
 ```
 novo pkg add fft-nv
-novo pkg build
-novo test
 ```
 
-## The one example that will work
+## Example
 
 ```novo
+use std.list
 use fftplan
 use fftwin
 use fftreal
 use fftspec
 
-// The spectrum of one window of a recording, in decibels.
-fn spectrum_db(samples: [Float], rate: Float) -> Result<[Float], FftFault>
-    let p = fftplan.of_len(samples.len())!
-    let windowed = fftwin.apply(FftHann, samples, true)!
-    let gain = fftwin.coherent_gain(FftHann, samples.len(), true)!
-    let half = fftreal.forward(p, windowed, FftNormNone)!
-    let power = fftspec.power(half, samples.len(), gain)!
-    fftspec.to_db(power, 1.0)
+fn main() [io]
+    // Eight samples, standing in for one window of a recording.
+    let samples = [0.0, 0.7, 1.0, 0.7, 0.0, -0.7, -1.0, -0.7]
+
+    // The plan holds the roots of unity for this length. Build it once
+    // and run it against every window of the recording.
+    match fftplan.of_len(8)
+        Err(e) => println(e.message())
+        Ok(p) =>
+            // The window tapers the ends, so the seam between one buffer
+            // and the next does not smear energy across every bin.
+            // `true` asks for periodic sampling rather than symmetric.
+            match fftwin.apply(FftHann, samples, true)
+                Err(e) => println(e.message())
+                Ok(windowed) =>
+                    // A real input has a mirrored spectrum, so this answers
+                    // five bins for eight samples and not eight.
+                    match fftreal.forward(p, windowed, FftNormNone)
+                        Err(e) => println(e.message())
+                        Ok(half) =>
+                            // One magnitude per bin.
+                            match fftspec.magnitude(half)
+                                Err(e)    => println(e.message())
+                                Ok(mags)  => println("${list.len(mags)} bins, and bin_count says ${fftreal.bin_count(8)}")
 ```
 
-Five calls, and four of them exist because the fifth would be wrong
-without them: the window stops the seam of the buffer from smearing
-energy across every bin, the gain undoes what the window took out,
-`fftreal` computes half the bins because the other half is a mirror, and
-the normalisation is named rather than assumed.
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a
+`not implemented: fft-nv.<module>.<fn>` panic. The tests are the
+specification the implementation will have to satisfy.
 
-## The layer, and why
+## What the package contains
 
-`core` — no effects at all.
+| Module | Contents |
+| --- | --- |
+| `fftplan` | The plan, the four normalisation conventions, the three algorithms, and the length arithmetic: is this a power of two, what is the next one, what are the factors. |
+| `fftcx` | The one-dimensional complex transforms over an interleaved buffer, the direct radix-2 forms, the conversions between separate and interleaved parts, the spectrum product and the conjugate. |
+| `fftreal` | The real-input transform and its inverse, the bin count, the frequency axis for it, and the conversions between a half spectrum and a full one. |
+| `fftspec` | What a caller does with a spectrum: magnitude, squared magnitude, phase, power with a window gain divided out, decibels, the two shifts, the frequency axis, and the peak. |
+| `fftwin` | Five window functions, their coefficients, applying one to a buffer, and the two gain corrections. |
+| `fft2d` | The two-dimensional transforms over an ndarray-nv matrix, along both axes or along one, with the magnitude, the two shifts and the shape helpers. |
+| `fftfix` | Fixed-length 64-point and 256-point transforms over a value type with inline arrays, which build for a microcontroller. |
+| `fftfault` | Every reason a transform refuses, as one enum with eleven variants. |
 
-A transform is arithmetic over numbers the caller already holds. A plan
-is trigonometry over a length. Nothing is opened, nothing is waited for,
-no clock is consulted, and the samples arrive as a buffer somebody else
-read. The budget is `[]` on every one of the 69 public functions and
-there was never any pressure on it.
+## How to choose an entry point
 
-**The device claim is built.** `tests/embedded_probe.nv` compiles
-`fftfix` to a Cortex-M4 ELF for `--target=nrf52-qemu`. The consumer is a
-condition-monitoring node: an accelerometer sampled at a kilohertz, a
-64-point window filled one reading at a time, one forward transform, and
-a look at which bin holds the energy — a bearing that has begun to fail
-rings at a frequency a threshold can watch for. The whole pipeline is a
-fixed-size buffer, six stages of butterflies and a comparison, and
-nothing in it allocates.
+**Build a plan with `fftplan.of_len`, then use `fftcx` for complex input
+and `fftreal` for real input.** A real input through `fftcx` costs twice
+the work and answers a spectrum whose second half you already knew.
 
-## The load-bearing interface
+**Use `fftplan.algorithm` before you fix a window size.** A length of
+1024 gets radix-2. A length of 1021 is prime and gets Bluestein, which
+runs a 2048-point convolution underneath. `fftplan.inner_len` says how
+big that convolution is.
 
-```novo
-pub struct FftPlan
-pub fn of_len(points: Int) -> Result<FftPlan, FftFault> []
-pub fn forward(p: FftPlan, buf: [Float], norm: FftNorm) -> Result<[Float], FftFault> []
+**Use `fft2d` for an image or any matrix.** It takes an ndarray-nv array
+of shape rows by columns by 2, transforms every row and then every
+column, and needs one plan per axis.
+
+**Use `fftfix` on a microcontroller.** See "Running on a
+microcontroller".
+
+**The one-dimensional transforms take an interleaved list and the
+two-dimensional ones take a shaped array.** A complex sequence is a
+sequence, and reading it through a shape and a stride would put an
+indirection inside the only loop that matters. A two-dimensional
+transform, by contrast, is rows and then columns, so the extents are the
+operation rather than a convention. The two layouts hold the same bytes:
+`ndfloat.to_list` of a rows-by-columns-by-2 array is the interleaved
+buffer.
+
+## The rules a user needs
+
+1. **Every transform takes a normalisation and none is the default.**
+   `FftNormNone` scales neither direction, which is FFTW's convention.
+   `FftNormBackward` scales the inverse by one over `n`, which is what
+   NumPy and scipy do. `FftNormForward` scales the forward direction.
+   `FftNormOrtho` gives each direction one over the square root of `n`.
+   A filter wants no scaling in the middle and one division at the end,
+   which is why the choice is an argument and not part of the plan.
+2. **A real transform answers `n/2 + 1` bins, not `n/2`.** A 1024-point
+   real transform gives 513 bins. `fftreal.bin_count` is that number. Bin
+   0 and the Nyquist bin are real.
+3. **Every window call takes `periodic` and none is the default.**
+   scipy's `get_window` samples a window periodically and its
+   `signal.windows.hann` samples it symmetrically, and the two differ.
+   Spectral analysis wants the periodic form. Filter design wants the
+   symmetric one.
+4. **Divide a windowed measurement by the right gain.** Use
+   `fftwin.coherent_gain` when you are measuring the amplitude of a
+   tone, and `fftwin.noise_gain` when you are measuring the power of
+   broadband noise. `fftspec.power` takes the gain as an argument for
+   this reason.
+5. **`fftshift` and `ifftshift` are different functions.** They rotate a
+   spectrum so that frequency zero is in the middle, and back. For an
+   odd bin count the two rotations differ by one place, so using one for
+   both does not round-trip.
+6. **`fftspec.fftfreq` lists the positive frequencies first and then the
+   negative ones**, which is the order the transform answers in, and
+   what NumPy documents. `fftreal.rfftfreq` is the axis for a half
+   spectrum.
+7. **A two-dimensional transform does rows and then columns.** The two
+   orders agree in exact arithmetic and differ in the last bits in
+   floating point, so the order is fixed here rather than left to an
+   implementation.
+8. **Nothing is transformed in place.** Every function takes a buffer
+   and answers a new one. When the caller does not keep the old binding,
+   as in `buf = fftcx.forward(p, buf, FftNormNone)!`, the old buffer is
+   uniquely referenced and the new value is written into its memory. A
+   caller who does keep the old binding gets a copy, which is what
+   keeping both costs.
+9. **An interleaved buffer has an even number of floats.** An odd count
+   is `FftOddInterleave`.
+10. **Convolution is three calls.** Transform both inputs, multiply the
+    spectra with `fftcx.mul_spectra`, and transform back. There is no
+    `convolve`, because it would have to choose the padding and the edge
+    behaviour for you.
+
+## Running on a microcontroller
+
+novo-lang lets a package state which of its modules can run on a device
+with no heap allocator, and the compiler checks that claim on every
+build. Here the claim covers `fftfix` alone.
+
+`fftfix` holds a buffer in a value type with an inline array, at one of
+two fixed lengths: `FftC64` for 64 points and `FftC256` for 256. The
+length is part of the type, so nothing is checked per call and nothing
+is allocated from start to end.
+
+```bash
+novo build --target=nrf52-qemu tests/embedded_probe.nv
 ```
 
-**`FftPlan` is a value the caller builds once per length.**
+That command builds a Cortex-M4 executable today. The probe is a
+condition-monitoring node: an accelerometer read at a kilohertz, a
+64-point buffer filled one sample at a time, one forward transform, and
+a look at which bin holds the energy. A failing bearing rings at a
+frequency a threshold can watch for.
 
-An FFT of length n needs the n complex roots of unity and, for the
-power-of-two case, the bit-reversal permutation that puts the input in
-the order the butterflies read it. Both depend on n alone — not on the
-data — so computing them once and reusing them across every window of a
-stream is the entire difference between a transform that is affordable
-in a loop and one that is not. A spectrogram of a ten-minute recording
-runs one plan across six thousand windows.
+The probe builds; it does not run. Every function it calls is a `todo()`
+today, so a device that executed it would panic in the first line of its
+main function. What the build checks is that the compiler accepts every
+one of these functions for a device: no list literal, no string
+concatenation, no unbounded loop.
 
-rustfft calls this a plan too, and hands out a boxed trait object from a
-planner that also caches. Here it is a plain **value**: `of_len` answers
-an `FftPlan`, the caller keeps it, and every transform is a pure
-function of it. It can sit in a struct beside the sample rate it belongs
-to, be copied, be used from two places, and it cannot be stale, because
-nothing mutates it. There is no planner and no cache — a value the
-caller holds **is** the cache, and it is one they can see.
+**A device cannot depend on this package as a whole.** The other seven
+modules speak lists, strings and ndarray-nv arrays, and one host-only
+function anywhere in a compilation unit is an undefined symbol at link
+time on a device, whether or not the firmware calls it. The probe is
+built against `fftfix` alone, and `fftfix` names no type from any other
+module here.
 
-Three things follow from the plan being a value, and they are why it is
-the load-bearing decision rather than an optimisation:
+`fftfix` differs from the host modules in two ways, and both are on
+purpose.
 
-- **The algorithm choice is inspectable.** `algorithm(p)` says whether
-  the length got radix-2, mixed-radix or Bluestein, and `inner_len(p)`
-  says how big Bluestein's convolution is. A caller picking a window
-  size can see that 1024 is cheap and 1021 carries a 2048-point
-  convolution — *before* they build a pipeline around it.
-- **Normalisation is NOT in the plan.** It is an argument, because the
-  same plan serves both directions and a filter wants no scaling in the
-  middle and one division at the end. Putting it in the plan would have
-  made that caller build two.
-- **The fallible half and the cheap half are separated.** `of_len` is
-  where a length is checked; `forward` against a matching buffer cannot
-  fail for any reason except the buffer's own length. A caller that
-  builds one plan and runs ten thousand windows pays the check once.
-
-## Two buffers, and which one each transform takes
-
-The 1-D transforms take an **interleaved `[Float]`** —
-`[re0, im0, re1, im1, …]`. The 2-D transforms take an **`NdFloat`** of
-shape `[rows, cols, 2]`. That is not an inconsistency; it is the same
-rule applied twice.
-
-**A 1-D transform has no shape.** A complex sequence is a sequence. An
-`NdFloat` is a buffer *plus* a shape, strides and an offset, so every
-read through it is `data[offset + i * stride]` — and a transform's inner
-loop does nothing but read, which puts the whole cost of the abstraction
-exactly where this package cannot afford it. A rank-1 `NdFloat` with
-stride 1 is the flat buffer with three extra numbers beside it, and the
-API would spend every call checking that those three numbers are what it
-needs.
-
-**A 2-D transform IS a shape.** It is rows then columns: transform every
-row, then transform every column of the result. The row and column
-extents are not a convention the caller and this package agree on — they
-are the operation. A flat list plus a row count would be this package
-asking the caller to carry a shape beside a buffer, which is precisely
-what `NdFloat` is, done badly.
-
-And the two layouts are the same layout: `ndfloat.to_list` of an
-`[r, c, 2]` array **is** the interleaved buffer. The third reason is
-`fftfix`, which has to reach a device where an `NdFloat` never will —
-keeping the 1-D surface on plain lists means the fixed-length module is
-the same API at a different width rather than a second design.
-
-## "In place" means value in, value out
-
-rustfft's `process` takes `&mut [Complex]` and overwrites it. A `core`
-package has no `[mutate]`, so every transform here takes a buffer and
-answers a new one. Under Perceus a caller who writes
-
-```novo
-buf = fftcx.forward(p, buf, FftNormNone)!
-```
-
-and does not keep the old binding gets the reuse: the buffer is uniquely
-referenced, so the new value is written into the old one's memory. That
-is the in-place transform, spelled as a value. A caller who *does* keep
-the old binding gets a copy, which is the honest cost of having asked
-for both.
-
-## What the device module does differently
-
-`fftfix` is the same idea at a fixed width, and it differs from the host
-modules in exactly two ways. Both are listed here because a reader
-moving code between them should meet the differences in a table rather
-than in a compiler error:
-
-| | host (`fftcx`) | device (`fftfix`) |
+| | `fftcx`, on a host | `fftfix`, on a device |
 | --- | --- | --- |
-| buffer | interleaved `[Float]`, any length | `FftC64` / `FftC256`, a `@value` struct with inline arrays |
-| length | the plan's, checked per call | the type's; nothing to check |
-| normalisation | an `FftNorm` argument on every call | none — forward is unscaled, inverse carries the factor |
-| windows | `fftwin`, which builds a coefficient list | none; a device compiles its own table |
+| Buffer | an interleaved list, any length | `FftC64` or `FftC256`, a value type with inline arrays |
+| Length | the plan's, checked on every call | the type's, so nothing is checked |
+| Normalisation | an argument on every call | none: forward is unscaled and the inverse carries the factor |
+| Windows | `fftwin` builds a coefficient list | none; a device compiles its own table |
 
-The normalisation difference is the one worth arguing. A threshold that
-compares bin powers does not care about a constant factor, and a scale
-argument would be a branch inside the only loop on that path — so the
-device transforms are unscaled forward, `1/N` inverse, and the round
-trip is the identity. The host transforms take an `FftNorm` because a
-notebook comparing a spectrum with numpy's genuinely needs the
-convention named. `fftfix` also names **no type from any other module**,
-and that is structural rather than stylistic: the device build compiles
-that file and whatever its `use` lines reach, so a normalisation enum
-borrowed from `fftplan` would have dragged `fftplan`'s `[Float]` fields
-onto a target with no allocator.
+A threshold that compares bin powers does not care about a constant
+factor, and a scale argument would be a branch inside the only loop on
+that path. The device round trip is still the identity.
 
-Two widths and not a family, because a `@value` struct's array length is
-part of its type and cannot be a parameter: every width is a *type* and
-costs a full set of functions. 64 points is the fast loop; 256 is what a
-vibration monitor wants. A third would be a third copy of everything for
-a resolution somebody can get by decimating.
+There are two widths rather than a family because the length of a value
+type's inline array is part of its type and cannot be a parameter. Each
+width costs a full set of functions. Sixty-four points is the fast loop
+and 256 is what a vibration monitor wants.
 
-## The reference implementations, and what is specification
+## What is not included
 
-rustfft and `scipy.fft` are the references. The distinction matters
-because it decides what a test may assert.
+- **A planner with a cache.** The plan is a value the caller holds, so
+  the caller's own binding is the cache.
+- **The discrete cosine and sine transforms, and the Hartley
+  transform.** Each is a real relative of the discrete Fourier transform
+  with its own four variants and its own normalisation table.
+- **Named convolution and correlation functions.** See rule 10.
+- **The short-time Fourier transform, and the spectrogram.** They are a
+  windowing policy, an overlap and a matrix of results, which sits above
+  everything here.
+- **Filter design.** The windows here are for spectral analysis. Filter
+  design, frequency response and zero-phase filtering are a different
+  subject.
+- **Single precision.** novo-lang's `Float` is a double, and a second
+  path at single precision would be a second implementation.
+- **A device build of anything but `fftfix`.** See "Running on a
+  microcontroller".
 
-**Specification, and binding on this package**
+## Related packages
 
-- The DFT itself. For a given input and length there is one answer, and
-  every algorithm here computes it: radix-2, mixed-radix and Bluestein
-  agree, and the suite checks the cases whose answers are exact — a
-  length-2 transform is one add and one subtract, a constant transforms
-  to a single DC bin, an impulse transforms to a flat spectrum.
-- **Conjugate symmetry of a real transform**, which is why `fftreal`
-  answers `n/2 + 1` bins and why bin 0 and bin `n/2` are real.
-- **The bin count is `n/2 + 1` and not `n/2`.** The plus one is the
-  Nyquist bin. A 1024-point real transform gives 513 bins, and a caller
-  who allocated 512 has written the bug `bin_count` exists to prevent.
-- **`fftfreq`'s ordering**: positive frequencies then negative ones,
-  which is the order the transform answers in and what numpy documents.
-- **`fftshift` and `ifftshift` are different functions.** For an odd
-  number of bins the two rotations differ by one, and a package with
-  only one of them would round-trip wrongly for every odd length.
-- The window formulas. Hann, Hamming and Blackman are three fixed sets
-  of cosine coefficients, and Kaiser is the Bessel family they
-  approximate.
+- [ndarray-nv](https://novo-lang.org/packages/ndarray-nv) is the matrix
+  the two-dimensional transforms read. `fftfix` uses none of it, which
+  is what lets the device probe reach that module alone.
+- [stats-nv](https://novo-lang.org/packages/stats-nv) summarises the
+  samples that go in and the powers that come out.
+- [plot-nv](https://novo-lang.org/packages/plot-nv) draws a spectrum.
+- [image-nv](https://novo-lang.org/packages/image-nv) holds the images
+  that `fft2d` filters in the frequency domain.
 
-**scipy's and rustfft's own choices, which this package follows and a
-test may not treat as correctness**
+## Tests
 
-- **Where the factor of n goes.** numpy and scipy scale the inverse;
-  FFTW scales neither; a unitary transform splits it. All three are in
-  use, so `FftNorm` names four conventions and **none of them is a
-  default** — every transform takes one.
-- **The Karatsuba-style thresholds**: when mixed-radix is preferred to
-  Bluestein for a composite length with a large prime factor, and the
-  radix a mixed-radix pass uses first. Speed decisions; the answers
-  agree.
-- **Rows before columns** in a 2-D transform. The two orders agree in
-  exact arithmetic and differ in the last bits in floating point, so it
-  is fixed here rather than left to an implementation — but it is a
-  convention, not a theorem.
-- **Symmetric vs periodic window sampling.** scipy's `get_window` is
-  periodic and its `signal.windows.hann` is symmetric, which is a trap
-  that has cost people real time. Here it is an explicit
-  `periodic: Bool` on every call with no default, because there is no
-  answer that is right for both callers.
+```bash
+novo test tests/fft_tests.nv          # 34 tests: the exact cases, the identities, the windows
+novo build --target=nrf52-qemu tests/embedded_probe.nv
+```
 
-So the correctness condition is **the exact cases are exact and the
-identities hold**: forward then inverse is the identity, the real
-transform agrees with the complex one over the first half, Parseval's
-theorem relates the two energies, and the three algorithms agree with
-each other at a length they all accept. A test that hard-coded
-`numpy.fft.fft(x)` for an arbitrary `x` would be asserting this
-implementation against a transcription.
+A transform of arbitrary data has no closed form, so a suite that
+recorded `numpy.fft.fft(x)` for a random `x` would be asserting this
+implementation against a transcription. The suite asserts three kinds of
+thing instead.
 
-## Deliberately not here
+The first is the cases whose answers are exact. A length-2 transform is
+one addition and one subtraction. A constant signal transforms to a
+single bin at zero frequency. A single non-zero sample transforms to a
+flat spectrum. A pure tone at exactly one bin's frequency transforms to
+two bins.
 
-- **A planner with a cache.** rustfft has one because its plans are
-  boxed trait objects a caller cannot easily hold. Here the plan is a
-  value, so the caller's own binding is the cache — and one they can
-  see the lifetime of.
-- **The discrete cosine and sine transforms**, and the Hartley
-  transform. Each is a real relative of the DFT with its own
-  normalisation table and its own four variants, and folding them in
-  here would double the surface for a different subject.
-  `scipy.fft.dct` is one row; **a missing row**, named in this lane's
-  report.
-- **Convolution and correlation as named functions.** They are
-  `forward`, `mul_spectra`, `inverse` — three calls a caller writes in
-  a line — and wrapping them would mean choosing padding and edge
-  behaviour on the caller's behalf. `mul_spectra` is here because the
-  interleaved multiply is the loop an interleaved layout invites getting
-  wrong.
-- **The short-time Fourier transform and the spectrogram.** They are a
-  windowing policy, an overlap and a matrix of results, which is a
-  higher layer sitting on everything above; `scipy.signal` is where
-  their neighbours are. **A missing row.**
-- **Filter design.** A window function here is for spectral analysis;
-  the same windows design FIR filters, and the rest of that subject —
-  `firwin`, `freqz`, `filtfilt` — is a different package.
-- **Single precision.** novo-lang's `Float` is a double, and a
-  package that also carried an f32 path would be two implementations.
-- **`@tier(embedded)` on anything but `fftfix`.** Every other module
-  speaks `[Float]`, `[Int]`, `Str` or `NdFloat`, and a list is a heap
-  allocation the tier refuses.
+The second is the identities, which hold for any input: forward then
+inverse is the original, Parseval's theorem relates the energy in the
+samples to the energy in the bins, the real transform agrees with the
+complex one over the first half, `fftshift` and `ifftshift` invert each
+other, and the three algorithms agree at a length all of them accept.
 
-## Status
+The third is the window coefficients, which scipy prints and which are
+three fixed sets of cosine terms plus the Bessel family that Kaiser
+approximates.
 
-Every function is `todo()`. `novo test` runs the API suite, and every
-assertion in it reaches `not implemented: fft-nv.<module>.<fn>` — which
-is the expected result until the bodies land, and is what makes the
-suite a description of the interface rather than of nothing.
-`novo test --isolate` is the readable form: one verdict per test, naming
-the function it stopped at.
+`tests/embedded_probe.nv` is the device claim as a program. The command
+above builds a Cortex-M4 executable today.
 
-| module | public types | functions | constants | implemented |
-| --- | --- | --- | --- | --- |
-| `fft2d` | 0 | 10 | 0 | no |
-| `fftcx` | 0 | 10 | 0 | no |
-| `fftfault` | 1 | 1 | 0 | no |
-| `fftfix` | 2 | 18 | 2 | no |
-| `fftplan` | 3 | 9 | 0 | no |
-| `fftreal` | 0 | 6 | 0 | no |
-| `fftspec` | 0 | 10 | 0 | no |
-| `fftwin` | 1 | 5 | 0 | no |
-| **total** | **7** | **69** | **2** | **no** |
+The tests compile today and fail at run, each on the
+`not implemented: fft-nv.<module>.<fn>` panic that is its body. That is
+the expected state of an interface release. They turn green one at a
+time as bodies land.
+
+## Implementation status
+
+| Item | Implemented |
+| --- | --- |
+| `fftfix.FFTFIX_C64_POINTS`, `.FFTFIX_C256_POINTS` | yes (they are constants) |
+| `fftplan.FftPlan`, `.FftNorm`, `.FftAlgo`, `fftwin.FftWindow` | declared |
+| `fftfix.FftC64`, `.FftC256`, `fftfault.FftFault` | declared |
+| `fftplan.of_len`, `.len`, `.float_len`, `.algorithm`, `.inner_len` | no |
+| `fftplan.is_power_of_two`, `.next_power_of_two`, `.factors`, `.scale` | no |
+| `fftcx.forward`, `.inverse`, `.forward_radix2`, `.inverse_radix2` | no |
+| `fftcx.interleave`, `.real_parts`, `.imag_parts`, `.of_real`, `.mul_spectra`, `.conjugate` | no |
+| `fftreal.bin_count`, `.forward`, `.inverse`, `.rfftfreq`, `.to_full`, `.to_half` | no |
+| `fftspec.magnitude`, `.magnitude_squared`, `.phase`, `.power`, `.to_db` | no |
+| `fftspec.fftshift`, `.ifftshift`, `.fftfreq`, `.peak_bin`, `.peak_frequency` | no |
+| `fftwin.coefficients`, `.apply`, `.coherent_gain`, `.noise_gain`, `.name` | no |
+| `fft2d.of_real`, `.real_part`, `.forward`, `.inverse`, `.forward_axis`, `.inverse_axis` | no |
+| `fft2d.magnitude`, `.fftshift`, `.ifftshift`, `.complex_shape` | no |
+| `fftfix`'s eighteen functions over the two fixed widths | no |
+| `fftfault`'s eleven variants, `.is_shape_fault` and its `Error` implementation | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->

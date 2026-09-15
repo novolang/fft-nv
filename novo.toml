@@ -1,6 +1,6 @@
 [package]
 name        = "fft-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The fast Fourier transform as a plan built once per length: radix-2, mixed-radix and Bluestein for prime lengths, forward and inverse complex transforms over an interleaved buffer the caller owns, the real-input transform that answers the half spectrum, 2-D transforms over ndarray-nv matrices, the four window functions a spectrum needs, and the frequency, power and shift helpers a notebook reaches for.  A fixed-length radix-2 module builds for a microcontroller.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
