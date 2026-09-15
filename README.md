@@ -53,7 +53,8 @@ on the data, so it is built once and used for every buffer of that
 length. A spectrogram of a ten-minute recording runs one plan across
 thousands of windows.
 
-Three algorithms cover every length, and the plan says which it chose.
+Three algorithms cover every length, and a plan reports which one it
+chose.
 
 | Length | Algorithm | Cost |
 | --- | --- | --- |
@@ -305,7 +306,7 @@ The third is the window coefficients, which scipy prints and which are
 three fixed sets of cosine terms plus the Bessel family that Kaiser
 approximates.
 
-`tests/embedded_probe.nv` is the device claim as a program. The command
+`tests/embedded_probe.nv` is that claim written as a program. The command
 above builds a Cortex-M4 executable today.
 
 The tests compile today and fail at run, each on the
